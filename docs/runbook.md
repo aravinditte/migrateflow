@@ -53,9 +53,8 @@ the proxy, verify the SPA and a demo login, then tear everything down.
 
 - **Backend restarted mid-run** — at startup, runs left `RUNNING` by the
   dead process are recovered automatically: their stale batch executions
-  are marked `FAILED` (preserving completed checkpoints) and the runs become
-  `FAILED_RESTARTABLE`, ready for same-instance restart. Stale `QUEUED` runs
-  are executed. Stale `RUNNING` validation snapshots are marked `FAILED`.
+  are abandoned and the runs become `FAILED_RESTARTABLE`, ready for the
+  normal restart below. Runs left `QUEUED` are executed.
 - **Run FAILED_RESTARTABLE** — fix the cause, then `POST /runs/{id}/restart`.
   The same run identity resumes; already-applied rows are recognised via the
   ledger and skipped. A restart never creates a second run row.
@@ -70,3 +69,37 @@ the proxy, verify the SPA and a demo login, then tear everything down.
 ## Health
 
 `GET /actuator/health` reports application and database status.
+
+## Public showcase (SPEC section 20)
+
+**Set up (once per fresh database).** Set `MIGRATEFLOW_SHOWCASE_BOOTSTRAP_ENABLED=true`
+and a `MIGRATEFLOW_SHOWCASE_BOOTSTRAP_TOKEN` in `.env`, start the stack
+(`docker compose up -d`), then run the one-time bootstrap:
+`docker compose --profile showcase up showcase-bootstrap`. The script
+drives the real workflow with the seeded demo actors and registers the
+verified scenario; watch for `Showcase READY` in its output. Afterwards
+the token/enable flag can be removed again — the public read API does not
+depend on them. Never reuse the `*-dev-pw` demo passwords on a public
+deployment; provision real operator accounts instead (runbook: demo seed).
+
+**Verify.** `python3 scripts/verify-showcase.py http://localhost:8081`
+re-checks the anonymous API against the fixture expectations and the
+lineage invariants; the UI shows the same integrity state on the overview
+(`integrity: OK`). A STALE/INTEGRITY_ALERT overview means a linked
+artifact changed after registration (new manifest frozen, target tampered,
+defect reopened) — the page lists the exact problems; investigate before
+re-registering anything.
+
+**Redeploy.** Safe: the registry, artifacts and uploaded files persist in
+the database/volume. Redeploys never re-run the bootstrap automatically,
+and no step truncates or resets the demo data.
+
+**Recover from a FAILED bootstrap.** Read `failure_message` in
+`control.showcase_scenarios` (or the script output). Fix the cause
+(usually credentials, token mismatch, or a genuinely failed gate), then
+re-run the same command: it resumes from the recorded artifact IDs and
+completes the remaining stages. If the failure happened after the cutover
+verified, the registry simply needs the final READY registration — the
+script detects the existing runs. Starting over requires a **fresh
+database**; there is deliberately no in-place reset for a consumed
+cutover slot.
