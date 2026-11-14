@@ -52,6 +52,25 @@ public class ShowcaseQueryService {
                 "The showcase has not been bootstrapped yet"));
     }
 
+    /**
+     * Detail endpoints serve only a scenario whose registration is READY
+     * AND whose lineage still verifies right now (review S-15). A
+     * PREPARING or FAILED scenario exposes nothing but the overview state.
+     */
+    public Scenario readyScenario() {
+        Scenario s = scenarioOrNotReady();
+        if (!"READY".equals(s.setupState())) {
+            throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "SHOWCASE_NOT_READY",
+                    "The showcase is " + s.setupState() + "; public evidence is served only for a READY scenario");
+        }
+        List<String> problems = verifyLineage(s);
+        if (!problems.isEmpty()) {
+            throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "SHOWCASE_INTEGRITY_ALERT",
+                    "Current lineage check failed: " + String.join("; ", problems));
+        }
+        return s;
+    }
+
     // ------------------------------------------------------------------
     // Overview
     // ------------------------------------------------------------------
@@ -60,8 +79,8 @@ public class ShowcaseQueryService {
         var maybe = registry.findBySlug(slug);
         if (maybe.isEmpty()) {
             return new ShowcaseDto.Overview(slug, "PUBLIC_READ_ONLY", "SYNTHETIC", "NOT_READY", null,
-                    "NOT_CHECKED", List.of(), null, new ShowcaseDto.BackendRef(true),
-                    null, null, null, null, null, null);
+                    "NOT_CHECKED", List.of(), String.valueOf(java.time.Instant.now()), null,
+                    new ShowcaseDto.BackendRef(true), null, null, null, null, null, null);
         }
         Scenario s = maybe.get();
         List<String> problems = "READY".equals(s.setupState()) ? verifyLineage(s) : List.of();
@@ -83,10 +102,12 @@ public class ShowcaseQueryService {
 
         ShowcaseDto.Money money = null;
         String cutoverEvidenceHash = null;
+        String cutoverReportCompletedAt = null;
         if (s.cutoverRunId() != null) {
             Map<String, Object> report = latestReport(s.cutoverRunId());
             if (report != null) {
                 cutoverEvidenceHash = (String) report.get("evidence_hash");
+                cutoverReportCompletedAt = ts((Timestamp) report.get("completed_at"));
                 JsonNode orders = summaryNode(report).path("orders");
                 money = new ShowcaseDto.Money("JPY",
                         orders.path("acceptedAmountYen").asLong(0),
@@ -96,14 +117,14 @@ public class ShowcaseQueryService {
         String manifestHash = s.manifestId() == null ? null : jdbc.queryForObject(
                 "SELECT manifest_hash FROM control.manifests WHERE id = ?", String.class, s.manifestId());
         ShowcaseDto.Verification verification = new ShowcaseDto.Verification(
-                s.verifiedAt(),
+                s.verifiedAt(), cutoverReportCompletedAt, s.createdAt(),
                 manifestHash == null ? null : manifestHash.trim().substring(0, Math.min(12, manifestHash.trim().length())),
                 manifestHash == null ? null : manifestHash.trim(),
                 cutoverEvidenceHash == null ? null : cutoverEvidenceHash.trim());
 
         return new ShowcaseDto.Overview(slug, "PUBLIC_READ_ONLY", "SYNTHETIC", state, s.setupStep(),
-                integrity, problems, s.failureMessage(), new ShowcaseDto.BackendRef(true),
-                project, counts, rehearsal, cutover, money, verification);
+                integrity, problems, String.valueOf(java.time.Instant.now()), s.failureMessage(),
+                new ShowcaseDto.BackendRef(true), project, counts, rehearsal, cutover, money, verification);
     }
 
     private ShowcaseDto.RunRef runRef(UUID runId) {
@@ -147,7 +168,7 @@ public class ShowcaseQueryService {
     // ------------------------------------------------------------------
 
     public ShowcaseDto.Workflow workflow() {
-        Scenario s = scenarioOrNotReady();
+        Scenario s = readyScenario();
         List<ShowcaseDto.Stage> stages = new ArrayList<>();
 
         stages.add(stage("project", "Project created", s.projectId() != null ? "COMPLETED" : "PENDING",
@@ -199,7 +220,7 @@ public class ShowcaseQueryService {
         Map<String, Object> approval = s.approvalId() == null ? null : jdbc.queryForMap(
                 "SELECT decision, created_at FROM control.approvals WHERE id = ?", s.approvalId());
         stages.add(stage("approval", "Reviewer approval (automated demo actor)",
-                approval == null ? "PENDING" : "APPROVE".equals(approval.get("decision")) ? "COMPLETED" : "FAILED",
+                approval == null ? "PENDING" : "APPROVED".equals(approval.get("decision")) ? "COMPLETED" : "FAILED",
                 approval == null ? null : ts((Timestamp) approval.get("created_at")),
                 Map.of("approvalId", str(s.approvalId()))));
         stages.add(runStage("cutover", "Final cutover", s.cutoverRunId()));
@@ -225,9 +246,9 @@ public class ShowcaseQueryService {
 
     private ShowcaseDto.Stage uatStage(Scenario s) {
         if (s.rehearsalRunId() == null) return stage("uat", "Automated synthetic UAT", "PENDING", null, Map.of());
-        List<UatService.UatCase> cases = uat.cases(s.rehearsalRunId());
+        List<UatService.CaseView> cases = uat.cases(s.rehearsalRunId());
         long passed = cases.stream().filter(c -> c.required() && "PASS".equals(c.latestResult())).count();
-        long required = cases.stream().filter(UatService.UatCase::required).count();
+        long required = cases.stream().filter(UatService.CaseView::required).count();
         boolean anyFail = cases.stream().anyMatch(c -> "FAIL".equals(c.latestResult()) || "BLOCKED".equals(c.latestResult()));
         String status = required > 0 && passed == required ? "COMPLETED" : anyFail ? "FAILED" : passed > 0 ? "IN_PROGRESS" : "PENDING";
         String at = tsField("SELECT max(e.executed_at) FROM control.uat_executions e JOIN control.uat_cases c ON c.id = e.case_id WHERE c.rehearsal_run_id = ?", s.rehearsalRunId());
@@ -244,7 +265,7 @@ public class ShowcaseQueryService {
     // ------------------------------------------------------------------
 
     public ShowcaseDto.IssuePage validationIssues(int page, int size, String code) {
-        Scenario s = scenarioOrNotReady();
+        Scenario s = readyScenario();
         String sql = "SELECT i.kind, i.code, i.field, i.message, "
                 + "(SELECT r.data_row_number FROM stage.customer_input_rows r WHERE r.id = i.source_row_id AND i.kind = 'CUSTOMERS' "
                 + " UNION ALL SELECT r.data_row_number FROM stage.order_input_rows r WHERE r.id = i.source_row_id AND i.kind = 'ORDERS') AS row_no, "
@@ -258,8 +279,8 @@ public class ShowcaseQueryService {
                 + (code == null || code.isBlank() ? "" : " AND i.code = ?")
                 + " ORDER BY i.kind, row_no NULLS LAST, i.code LIMIT ? OFFSET ?";
         Object[] args = code == null || code.isBlank()
-                ? new Object[]{s.snapshotId(), size, page * size}
-                : new Object[]{s.snapshotId(), code, size, page * size};
+                ? new Object[]{s.snapshotId(), size, com.migrateflow.common.PageRequestUtil.safeOffset(page, size)}
+                : new Object[]{s.snapshotId(), code, size, com.migrateflow.common.PageRequestUtil.safeOffset(page, size)};
         List<ShowcaseDto.IssueRow> rows = jdbc.query(sql, (rs, n) -> new ShowcaseDto.IssueRow(
                 rs.getString("kind"), rs.getInt("row_no"), rs.getString("code"),
                 rs.getString("field") == null ? "" : rs.getString("field"), rs.getString("message"),
@@ -270,7 +291,7 @@ public class ShowcaseQueryService {
     }
 
     public ShowcaseDto.MappingView mapping() {
-        Scenario s = scenarioOrNotReady();
+        Scenario s = readyScenario();
         Map<String, Object> m = jdbc.queryForMap(
                 "SELECT id, revision_no, definition_hash, definition_json::text AS def FROM control.mapping_revisions WHERE id = ?",
                 s.mappingRevisionId());
@@ -283,7 +304,7 @@ public class ShowcaseQueryService {
     }
 
     public ShowcaseDto.ReconciliationView reconciliation(String scope) {
-        Scenario s = scenarioOrNotReady();
+        Scenario s = readyScenario();
         UUID runId = "cutover".equals(scope) ? s.cutoverRunId() : s.rehearsalRunId();
         if (runId == null) {
             throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, "SHOWCASE_NOT_READY",
@@ -305,7 +326,7 @@ public class ShowcaseQueryService {
     }
 
     public ShowcaseDto.UatView uat() {
-        Scenario s = scenarioOrNotReady();
+        Scenario s = readyScenario();
         List<ShowcaseDto.UatCaseView> cases = jdbc.query(
                 "SELECT c.case_key, c.title, c.required, e.result, e.actual_result, e.executed_at, u.role AS exec_role "
                         + "FROM control.uat_cases c "
@@ -342,19 +363,19 @@ public class ShowcaseQueryService {
     }
 
     public ShowcaseDto.AuditPage audit(int page, int size) {
-        Scenario s = scenarioOrNotReady();
+        Scenario s = readyScenario();
         List<ShowcaseDto.AuditRow> rows = jdbc.query(
                 "SELECT a.action, a.entity_type, a.occurred_at, u.role FROM control.audit_events a "
                         + "LEFT JOIN control.users u ON u.id = a.actor_id WHERE a.project_id = ? "
                         + "ORDER BY a.occurred_at DESC LIMIT ? OFFSET ?",
                 (rs, n) -> new ShowcaseDto.AuditRow(rs.getString("action"), rs.getString("entity_type"),
                         rs.getString("role") == null ? "" : rs.getString("role"), ts(rs.getTimestamp("occurred_at"))),
-                s.projectId(), size, page * size);
+                s.projectId(), size, com.migrateflow.common.PageRequestUtil.safeOffset(page, size));
         return new ShowcaseDto.AuditPage(rows, page, size);
     }
 
     public ShowcaseDto.RecordPage records(String kind, int page, int size) {
-        Scenario s = scenarioOrNotReady();
+        Scenario s = readyScenario();
         if (s.cutoverRunId() == null) return new ShowcaseDto.RecordPage(List.of(), page, size);
         boolean customers = !"orders".equals(kind);
         String table = customers ? "target.customers" : "target.orders";
@@ -369,11 +390,25 @@ public class ShowcaseQueryService {
                         + " FROM " + table + " t "
                         + "JOIN control.source_files f ON f.id = t.source_file_id "
                         + "JOIN " + stageTable + " r ON r.file_id = t.source_file_id AND r.data_row_number = t.source_row_number "
+                        // Only the showcase cutover's own rows (S-16): an
+                        // operator's other work in the same target tables
+                        // must never leak into the public read model.
+                        + "WHERE t.origin_run_id = ? "
                         + "ORDER BY t." + idCol + " LIMIT ? OFFSET ?",
                 (rs, n) -> {
                     Map<String, String> source;
                     try {
-                        source = mapper.readValue(rs.getString("raw"), new TypeReference<>() {});
+                        Map<String, String> parsed = mapper.readValue(rs.getString("raw"), new TypeReference<>() {});
+                        // Explicit source-field allowlist (S-16): only the
+                        // known synthetic fixture columns are publishable.
+                        List<String> allowed = customers
+                                ? List.of("Cust_No", "Customer_Name", "Email", "Join_Date")
+                                : List.of("Order_No", "Cust_No", "Order_Dt", "Amount_JPY", "State");
+                        Map<String, String> filtered = new LinkedHashMap<>();
+                        for (String key : allowed) {
+                            if (parsed.containsKey(key)) filtered.put(key, parsed.get(key));
+                        }
+                        source = filtered;
                     } catch (Exception e) {
                         source = Map.of();
                     }
@@ -393,7 +428,7 @@ public class ShowcaseQueryService {
                     return new ShowcaseDto.RecordRow(customers ? "customers" : "orders", rs.getString("ext_id"),
                             source, target, rs.getString("filename"), rs.getInt("source_row_number"),
                             rs.getObject("origin_run_id", UUID.class).toString());
-                }, size, page * size);
+                }, s.cutoverRunId(), size, com.migrateflow.common.PageRequestUtil.safeOffset(page, size));
         return new ShowcaseDto.RecordPage(rows, page, size);
     }
 
