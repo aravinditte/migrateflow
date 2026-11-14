@@ -163,8 +163,8 @@ class FullMigrationFlowTest extends AbstractIntegrationTest {
         // Unauthenticated access is refused (T19).
         mvc.perform(get("/api/v1/projects")).andExpect(status().isUnauthorized());
 
-        // Uniform invalid-credential error.
-        mvc.perform(post("/api/v1/auth/login").contentType(MediaType.APPLICATION_JSON)
+        // Uniform invalid-credential error (with a valid CSRF token, like the SPA).
+        mvc.perform(post("/api/v1/auth/login").with(csrf()).contentType(MediaType.APPLICATION_JSON)
                         .content("{\"email\":\"engineer@example.test\",\"password\":\"wrong\"}"))
                 .andExpect(status().isUnauthorized());
 

@@ -28,6 +28,11 @@ auth/CSRF/membership guards and malformed-upload rejection.
 the same run identity restarts to exact counts with no duplicates — checked
 for both rehearsal and cutover.
 
+`ProcessRecoveryTest` covers startup recovery: a run left `RUNNING` by a
+terminated process is marked `FAILED_RESTARTABLE` (its stale batch
+executions abandoned) so the ordinary restart path can resume it. A test
+that kills a real OS process mid-batch is not part of the suite.
+
 Integration tests need a reachable PostgreSQL:
 
 ```bash

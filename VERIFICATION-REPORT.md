@@ -55,6 +55,56 @@ network is normal:
 - GitHub Actions CI itself, until the first run completes on the pushed
   branch.
 
+## Fix round — external repository review, 2026-11-14
+
+An external review of the merged `main` branch was triaged claim by claim
+against the source. The following findings were **confirmed in the code and
+fixed** in this round (branch `migrateflow-review-fixes`):
+
+1. **Compile blocker:** `ManifestController.get()` built a 13-pair
+   `Map.of(...)` (Java allows at most 10). Now `Map.ofEntries(...)`. A scan
+   confirmed this was the only oversized `Map.of` in the codebase.
+2. **Demo password mismatch:** the seed runner read
+   `MIGRATEFLOW_SEED_*_PASSWORD` while Compose/`.env.example` pass
+   `MIGRATEFLOW_*_PASSWORD`. The runner now uses the documented names.
+3. **Test login CSRF:** the integration-test login posts carried no CSRF
+   token and would have received 403. Test login and the invalid-credential
+   post now send one, mirroring the SPA.
+4. **Cutover slot deleted by reset:** both the test reset and
+   `scripts/reset-demo.sql` truncate `control.runs` with CASCADE, which
+   also empties `target_cutover_slot` (it references `runs`). Both now
+   restore the singleton row with INSERT ... ON CONFLICT.
+5. **Cutover preflight now revalidates UAT:** inside the preflight
+   transaction, the approval's stored UAT evidence hash is compared with a
+   freshly computed hash and the blocker gate is re-run. A case re-executed
+   after approval, or a blocking defect opened after approval, now fails
+   the cutover launch (`UAT_EVIDENCE_STALE` / `UAT_NOT_PASSED`).
+6. **Cross-project references:** starting a validation now verifies the
+   bundle, mapping revision and rule set belong to the URL's project
+   (foreign ids are 404).
+7. **Validation transaction:** the `@Transactional` annotation was bypassed
+   by self-invocation from the executor lambda. Validation writes now run
+   in an explicit `TransactionTemplate`; failures roll back and mark the
+   snapshot FAILED separately.
+8. **Launch/restart races:** rehearsal launch serialises on the project
+   row inside one transaction; restart is an atomic conditional-update
+   claim; `executeRun` itself claims QUEUED → RUNNING atomically.
+9. **Frozen-plan exclusions:** exclusion decisions are rejected once a
+   FROZEN manifest binds the snapshot (`MANIFEST_ALREADY_FROZEN`).
+10. **Process recovery:** a new startup recovery abandons stale batch
+    executions left by a terminated process and marks their runs
+    FAILED_RESTARTABLE; QUEUED runs are executed. Covered by
+    `ProcessRecoveryTest`.
+
+Still true after this round: the backend has **not** been compiled or
+test-run by the author of this report — the sandbox JVM-network block
+described above is unchanged, and these fixes are source-reviewed only.
+They execute in CI exactly like the original suite, once
+`.github/workflows/ci.yml` is present (see the note in the README PR: the
+file remains blocked by the GitHub integration's Workflows permission and
+must be added manually). A true OS-process kill-and-restart test (beyond
+the recovery state-transition test above) is still not part of the suite.
+
 ## Test inventory (what CI will execute)
 
 | Suite | Covers |
@@ -66,4 +116,5 @@ network is normal:
 | `CommonTest` | Canonical hash stability, CSV formula escaping |
 | `FullMigrationFlowTest` | Whole journey over HTTP on real PostgreSQL: exclusion gate, freeze, rehearsal isolation, reconciliation, UAT gate, separation of duties, idempotent cutover, exact final counts, second-cutover refusal, auth/CSRF/membership guards, malformed upload |
 | `CrashRestartTest` | Test-only fault injection kills rehearsal and cutover after committed chunks; same-identity restart finishes with exact counts and no duplicates |
+| `ProcessRecoveryTest` | A run left RUNNING by a terminated process is recovered at startup to FAILED_RESTARTABLE (stale batch executions abandoned); recovery is idempotent |
 | Frontend Vitest | Formatting helpers (currency, hashes, instants, polling) |

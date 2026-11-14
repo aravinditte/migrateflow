@@ -66,20 +66,27 @@ public class RunService {
     public UUID launchRehearsal(AppUser actor, UUID manifestId) {
         Map<String, Object> manifest = manifestRow(manifestId);
         UUID projectId = (UUID) manifest.get("project_id");
-        if (!"FROZEN".equals(manifest.get("status"))) {
-            throw ApiException.conflict("PLAN_CHANGED", "Manifest is not the current frozen plan");
-        }
-        Long active = jdbc.queryForObject(
-                "SELECT count(*) FROM control.runs WHERE project_id = ? AND status IN ('QUEUED','RUNNING')",
-                Long.class, projectId);
-        if (active != null && active > 0) {
-            throw ApiException.conflict("JOB_ALREADY_RUNNING", "This project already has an active run");
-        }
         UUID snapshotId = (UUID) manifest.get("snapshot_id");
         UUID runId = UUID.randomUUID();
-        jdbc.update("INSERT INTO control.runs (id, project_id, manifest_id, kind, status, requested_by, expected_accepted_rows) "
-                        + "VALUES (?,?,?,'REHEARSAL','QUEUED',?,?)",
-                runId, projectId, manifestId, actor.id(), acceptedRows.acceptedCount(snapshotId));
+        // The active-run check and the insert are one transaction holding the
+        // project row lock, so two concurrent launches cannot both pass.
+        txTemplate.executeWithoutResult(status -> {
+            jdbc.queryForObject("SELECT id FROM control.projects WHERE id = ? FOR UPDATE", UUID.class, projectId);
+            String manifestStatus = jdbc.queryForObject(
+                    "SELECT status FROM control.manifests WHERE id = ?", String.class, manifestId);
+            if (!"FROZEN".equals(manifestStatus)) {
+                throw ApiException.conflict("PLAN_CHANGED", "Manifest is not the current frozen plan");
+            }
+            Long active = jdbc.queryForObject(
+                    "SELECT count(*) FROM control.runs WHERE project_id = ? AND status IN ('QUEUED','RUNNING')",
+                    Long.class, projectId);
+            if (active != null && active > 0) {
+                throw ApiException.conflict("JOB_ALREADY_RUNNING", "This project already has an active run");
+            }
+            jdbc.update("INSERT INTO control.runs (id, project_id, manifest_id, kind, status, requested_by, expected_accepted_rows) "
+                            + "VALUES (?,?,?,'REHEARSAL','QUEUED',?,?)",
+                    runId, projectId, manifestId, actor.id(), acceptedRows.acceptedCount(snapshotId));
+        });
         audit.record(projectId, actor.id(), "REHEARSAL_LAUNCHED", "run", runId, Map.of("manifestId", manifestId.toString()));
         executor.execute(() -> executeRun(runId));
         return runId;
@@ -116,7 +123,7 @@ public class RunService {
                 throw ApiException.conflict("PLAN_CHANGED", "Manifest is not the current frozen plan");
             }
             Map<String, Object> approval = jdbc.queryForMap(
-                    "SELECT manifest_id, rehearsal_run_id, reconciliation_report_id, decision, reviewer_id "
+                    "SELECT manifest_id, rehearsal_run_id, reconciliation_report_id, decision, reviewer_id, uat_evidence_hash "
                             + "FROM control.approvals WHERE id = ?", approvalId);
             if (!manifestId.equals(approval.get("manifest_id")) || !"APPROVED".equals(approval.get("decision"))) {
                 throw ApiException.unprocessable("INVALID_REFERENCE",
@@ -138,6 +145,20 @@ public class RunService {
                     (UUID) approval.get("reconciliation_report_id"));
             if (!"PASS".equals(reportStatus)) {
                 throw ApiException.unprocessable("RECONCILIATION_FAILED", "The approved reconciliation report is not PASS");
+            }
+            // The approval bound the UAT evidence as it stood when it was
+            // signed. Recompute it NOW, inside the preflight transaction: a
+            // case re-executed to FAIL, or a blocking defect opened after
+            // approval, invalidates the approval instead of reaching cutover.
+            String approvedHash = String.valueOf(approval.get("uat_evidence_hash")).trim();
+            String currentHash = uat.uatEvidenceHash(rehearsalRunId);
+            if (!currentHash.equals(approvedHash)) {
+                throw ApiException.unprocessable("UAT_EVIDENCE_STALE",
+                        "UAT evidence changed after approval; a fresh approval is required");
+            }
+            String blocker = uat.approvalBlocker(rehearsalRunId);
+            if (blocker != null) {
+                throw ApiException.unprocessable("UAT_NOT_PASSED", blocker);
             }
             Long targetRows = jdbc.queryForObject(
                     "SELECT (SELECT count(*) FROM target.customers) + (SELECT count(*) FROM target.orders)", Long.class);
@@ -165,9 +186,6 @@ public class RunService {
 
     public void restart(AppUser actor, UUID runId) {
         Map<String, Object> run = runRow(runId);
-        if (!"FAILED_RESTARTABLE".equals(run.get("status"))) {
-            throw ApiException.conflict("JOB_NOT_RESTARTABLE", "Only a failed restartable run can be restarted");
-        }
         if ("CUTOVER".equals(run.get("kind"))) {
             UUID activeRun = jdbc.queryForObject(
                     "SELECT active_run_id FROM control.target_cutover_slot WHERE slot_id = 1", UUID.class);
@@ -175,17 +193,33 @@ public class RunService {
                 throw ApiException.conflict("JOB_NOT_RESTARTABLE", "The cutover slot no longer belongs to this run");
             }
         }
-        jdbc.update("UPDATE control.runs SET status = 'QUEUED', error_message = NULL WHERE id = ?", runId);
+        // Atomic claim: exactly one caller can move the run out of
+        // FAILED_RESTARTABLE; a concurrent restart loses here, not later.
+        int claimed = jdbc.update(
+                "UPDATE control.runs SET status = 'QUEUED', error_message = NULL WHERE id = ? AND status = 'FAILED_RESTARTABLE'",
+                runId);
+        if (claimed == 0) {
+            throw ApiException.conflict("JOB_NOT_RESTARTABLE", "Only a failed restartable run can be restarted");
+        }
         audit.record((UUID) run.get("project_id"), actor.id(), "RUN_RESTARTED", "run", runId, Map.of());
         executor.execute(() -> executeRun(runId));
     }
 
     void executeRun(UUID runId) {
+        // Atomic claim: only the caller that moves QUEUED -> RUNNING owns the
+        // execution. Duplicate submissions (executor retry, startup recovery
+        // racing a launch) return without launching the job a second time.
+        int claimed = jdbc.update(
+                "UPDATE control.runs SET status = 'RUNNING', started_at = COALESCE(started_at, now()), finished_at = NULL "
+                        + "WHERE id = ? AND status = 'QUEUED'", runId);
+        if (claimed == 0) {
+            log.info("Run {} was not QUEUED when execution was attempted; skipping duplicate launch", runId);
+            return;
+        }
         Map<String, Object> run = runRow(runId);
         String kind = (String) run.get("kind");
         UUID manifestId = (UUID) run.get("manifest_id");
         UUID snapshotId = jdbc.queryForObject("SELECT snapshot_id FROM control.manifests WHERE id = ?", UUID.class, manifestId);
-        jdbc.update("UPDATE control.runs SET status = 'RUNNING', started_at = COALESCE(started_at, now()), finished_at = NULL WHERE id = ?", runId);
         Job job = "REHEARSAL".equals(kind) ? rehearsalJob : cutoverJob;
         JobParameters params = new JobParametersBuilder()
                 .addString("runId", runId.toString(), true)

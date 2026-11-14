@@ -165,6 +165,17 @@ public class PlanController {
         if (!"COMPLETED".equals(snapshotStatus)) {
             throw ApiException.conflict("SNAPSHOT_NOT_COMPLETED", "Exclusions can only be decided on a completed snapshot");
         }
+        // Once a manifest is frozen over this snapshot, its exclusion set is
+        // part of the frozen plan (bound by hash). Late decisions would
+        // diverge from every downstream run, so the snapshot is locked;
+        // changing the plan means validating a new snapshot.
+        Long frozen = jdbc.queryForObject(
+                "SELECT count(*) FROM control.manifests WHERE snapshot_id = ? AND status = 'FROZEN'",
+                Long.class, snapshotId);
+        if (frozen != null && frozen > 0) {
+            throw ApiException.conflict("MANIFEST_ALREADY_FROZEN",
+                    "This snapshot is bound to a frozen manifest; exclusion decisions are locked");
+        }
         // The row must be an invalid row of this snapshot: exclusions approve
         // the omission of invalid rows, they never waive validity (spec 4.4).
         String validatedTable = "CUSTOMERS".equals(body.dataset())

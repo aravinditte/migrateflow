@@ -45,6 +45,10 @@ only.**
 
 ## Failure handling
 
+- **Backend restarted mid-run** — at startup, runs left `RUNNING` by the
+  dead process are recovered automatically: their stale batch executions
+  are abandoned and the runs become `FAILED_RESTARTABLE`, ready for the
+  normal restart below. Runs left `QUEUED` are executed.
 - **Run FAILED_RESTARTABLE** — fix the cause, then `POST /runs/{id}/restart`.
   The same run identity resumes; already-applied rows are recognised via the
   ledger and skipped. A restart never creates a second run row.

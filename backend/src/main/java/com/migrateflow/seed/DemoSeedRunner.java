@@ -35,10 +35,10 @@ public class DemoSeedRunner implements ApplicationRunner {
     @Override
     public void run(ApplicationArguments args) {
         if (!enabled || users.count() > 0) return;
-        seed("engineer@example.test", "MIGRATEFLOW_SEED_ENGINEER_PASSWORD", "engineer-dev-pw", "Demo Engineer", "ENGINEER");
-        seed("reviewer@example.test", "MIGRATEFLOW_SEED_REVIEWER_PASSWORD", "reviewer-dev-pw", "Demo Reviewer", "REVIEWER");
-        seed("auditor@example.test", "MIGRATEFLOW_SEED_AUDITOR_PASSWORD", "auditor-dev-pw", "Demo Auditor", "AUDITOR");
-        seed("admin@example.test", "MIGRATEFLOW_SEED_ADMIN_PASSWORD", "admin-dev-pw", "Demo Admin", "ADMIN");
+        seed("engineer@example.test", "MIGRATEFLOW_ENGINEER_PASSWORD", "engineer-dev-pw", "Demo Engineer", "ENGINEER");
+        seed("reviewer@example.test", "MIGRATEFLOW_REVIEWER_PASSWORD", "reviewer-dev-pw", "Demo Reviewer", "REVIEWER");
+        seed("auditor@example.test", "MIGRATEFLOW_AUDITOR_PASSWORD", "auditor-dev-pw", "Demo Auditor", "AUDITOR");
+        seed("admin@example.test", "MIGRATEFLOW_ADMIN_PASSWORD", "admin-dev-pw", "Demo Admin", "ADMIN");
         log.warn("Demo seed created 4 synthetic users (dev-only). Disable MIGRATEFLOW_DEMO_SEED_ENABLED outside local demos.");
     }
 

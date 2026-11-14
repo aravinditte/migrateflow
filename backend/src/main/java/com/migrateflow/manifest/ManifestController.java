@@ -57,20 +57,20 @@ public class ManifestController {
         AppUser actor = SecurityConfig.requireUser(users, auth);
         access.requireMembership(actor, access.projectOfManifest(manifestId));
         return jdbc.query("SELECT * FROM control.manifests WHERE id = ?",
-                (rs, n) -> Map.<String, Object>of(
-                        "manifestId", rs.getObject("id", UUID.class).toString(),
-                        "projectId", rs.getObject("project_id", UUID.class).toString(),
-                        "bundleId", rs.getObject("bundle_id", UUID.class).toString(),
-                        "mappingRevisionId", rs.getObject("mapping_revision_id", UUID.class).toString(),
-                        "ruleSetRevisionId", rs.getObject("rule_set_revision_id", UUID.class).toString(),
-                        "snapshotId", rs.getObject("snapshot_id", UUID.class).toString(),
-                        "exclusionHash", rs.getString("exclusion_hash"),
-                        "targetContractHash", rs.getString("target_contract_hash"),
-                        "manifestHash", rs.getString("manifest_hash"),
-                        "fingerprint", CanonicalHash.shortFingerprint(rs.getString("manifest_hash")),
-                        "status", rs.getString("status"),
-                        "createdBy", rs.getObject("created_by", UUID.class).toString(),
-                        "createdAt", String.valueOf(rs.getTimestamp("created_at").toInstant())),
+                (rs, n) -> Map.<String, Object>ofEntries(
+                        Map.entry("manifestId", rs.getObject("id", UUID.class).toString()),
+                        Map.entry("projectId", rs.getObject("project_id", UUID.class).toString()),
+                        Map.entry("bundleId", rs.getObject("bundle_id", UUID.class).toString()),
+                        Map.entry("mappingRevisionId", rs.getObject("mapping_revision_id", UUID.class).toString()),
+                        Map.entry("ruleSetRevisionId", rs.getObject("rule_set_revision_id", UUID.class).toString()),
+                        Map.entry("snapshotId", rs.getObject("snapshot_id", UUID.class).toString()),
+                        Map.entry("exclusionHash", rs.getString("exclusion_hash")),
+                        Map.entry("targetContractHash", rs.getString("target_contract_hash")),
+                        Map.entry("manifestHash", rs.getString("manifest_hash")),
+                        Map.entry("fingerprint", CanonicalHash.shortFingerprint(rs.getString("manifest_hash"))),
+                        Map.entry("status", rs.getString("status")),
+                        Map.entry("createdBy", rs.getObject("created_by", UUID.class).toString()),
+                        Map.entry("createdAt", String.valueOf(rs.getTimestamp("created_at").toInstant()))),
                 manifestId).stream().findFirst().orElseThrow(() -> ApiException.notFound("Manifest"));
     }
 }
