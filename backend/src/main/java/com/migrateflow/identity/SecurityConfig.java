@@ -92,6 +92,7 @@ public class SecurityConfig {
             throw new ApiException(HttpStatus.UNAUTHORIZED, "UNAUTHENTICATED", "A valid session is required");
         }
         return users.findByEmail(auth.getName())
+                .filter(AppUser::enabled)
                 .orElseThrow(() -> new ApiException(HttpStatus.UNAUTHORIZED, "UNAUTHENTICATED", "A valid session is required"));
     }
 }
