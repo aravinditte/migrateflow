@@ -22,7 +22,10 @@ TRUNCATE control.audit_events, control.approvals, control.defects,
          control.batch_step_execution_context, control.batch_step_execution,
          control.batch_job_execution, control.batch_job_instance
          RESTART IDENTITY CASCADE;
-UPDATE control.target_cutover_slot
-   SET status = 'FREE', active_run_id = NULL, verified_run_id = NULL, updated_at = now()
- WHERE slot_id = 1;
+-- The TRUNCATE ... CASCADE above also empties target_cutover_slot (it
+-- references control.runs), so restore the singleton row explicitly.
+INSERT INTO control.target_cutover_slot (slot_id, status, active_run_id, verified_run_id)
+VALUES (1, 'FREE', NULL, NULL)
+ON CONFLICT (slot_id) DO UPDATE SET
+    status = 'FREE', active_run_id = NULL, verified_run_id = NULL, updated_at = now();
 COMMIT;
