@@ -43,6 +43,12 @@ only.**
 8. Approve (reviewer). Launch cutover (engineer). Final reconciliation
    PASS; the target now holds exactly the accepted dataset.
 
+## Verifying a fresh deployment
+
+`scripts/smoke-compose.sh` performs the T01 clean-startup check: build
+and start the Compose stack, wait for the backend health endpoint via
+the proxy, verify the SPA and a demo login, then tear everything down.
+
 ## Failure handling
 
 - **Backend restarted mid-run** — at startup, runs left `RUNNING` by the
