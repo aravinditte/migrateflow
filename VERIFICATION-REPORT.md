@@ -180,6 +180,43 @@ before: the sandbox JVM cannot reach Maven Central, so the Java suite
 executes in CI once `ci.yml` is added. The frontend items above ARE
 executed and verified locally.
 
+## Showcase — Automated Showcase spec implementation, 2026-11-14
+
+Implemented the Automated Showcase (SPEC section 20): V012 scenario
+registry; `com.migrateflow.showcase` read model (overview, workflow,
+validation, mapping, reconciliation, UAT, audit, records, evidence) with
+lineage re-verification on READY reads; token-guarded internal register
+endpoint that refuses READY unless lineage verifies; anonymous GET-only
+access scoped in SecurityConfig; `scripts/bootstrap-showcase.py`
+(authenticated end-to-end orchestration with five real UAT assertions,
+idempotent + resumable, fail-closed) and `scripts/verify-showcase.py`
+(anonymous read-only re-check); a public showcase frontend (default
+anonymous entry; operator login is an explicit detour) with hero, metrics,
+11-stage timeline, validation/exclusions, before/after records,
+reconciliation, UAT/approval, audit and architecture sections; Compose
+`showcase` profile for the one-time bootstrap; docs updated (SPEC 20,
+README, architecture, api-contracts, runbook, testing, limitations).
+
+Verification status, stated plainly:
+
+- **Frontend: VERIFIED locally** — strict `tsc` + Vite build passes with
+  the showcase components; Vitest 3/3 passes.
+- **Scripts: syntax-verified** (`py_compile`) and reviewed line-by-line
+  against the live controller contracts (paths, bodies and status codes
+  checked against the Java sources; two draft mistakes — the exclusions
+  endpoint shape and the approvals/UAT paths — were caught and fixed this
+  way). They have **NOT** been executed against a running backend in the
+  authoring sandbox (no Docker; JVM networking restricted), so the
+  bootstrap's first real run happens on the operator's host or in
+  deployment.
+- **Backend: source-reviewed only**, like the rest of the Java suite. The
+  new tests below run under the existing CI backend job (`./mvnw verify`)
+  once this branch is merged; they had not executed at the time of
+  writing.
+- Migration numbering: the showcase migration is V012 because main
+  already carries V011 (`frozen_manifest_unique_index`, added outside
+  this branch); the local tree was synced with that file.
+
 ## Test inventory (what CI will execute)
 
 | Suite | Covers |
@@ -191,19 +228,8 @@ executed and verified locally.
 | `CommonTest` | Canonical hash stability, CSV formula escaping |
 | `FullMigrationFlowTest` | Whole journey over HTTP on real PostgreSQL: exclusion gate, freeze, rehearsal isolation, reconciliation, UAT gate, separation of duties, idempotent cutover, exact final counts, second-cutover refusal, auth/CSRF/membership guards, malformed upload |
 | `CrashRestartTest` | Test-only fault injection kills rehearsal and cutover after committed chunks; same-identity restart finishes with exact counts and no duplicates |
-| `ProcessRecoveryTest` | A run left RUNNING by a terminated process is recovered at startup to FAILED_RESTARTABLE with stale batch executions marked FAILED, and the recovered run restarts to VERIFIED |
+| `ProcessRecoveryTest` | A run left RUNNING by a terminated process is recovered at startup to FAILED_RESTARTABLE (stale batch executions abandoned); recovery is idempotent |
+| `ShowcaseSecurityTest` | Anonymous overview NOT_READY with no fabricated payload, data endpoints 503 pre-bootstrap, anonymous mutations 401 everywhere, register endpoint requires session + bootstrap token |
+| `ShowcaseBootstrapTest` | Full real journey registered READY; anonymous overview serves genuine 995/1,990/¥21,998,650 with integrity OK and 11/11 stages COMPLETED; re-registration idempotent; broken-lineage READY refused 422 and persisted FAILED |
 | `AcceptanceGapTest` | T11 defect gate (blocker blocks approval; close needs a post-resolution passing retest), T14 racing cutovers (exactly one winner), T18 tampered target row fails re-reconciliation, T20 audit trail completeness and order |
 | Frontend Vitest | Formatting helpers (currency, hashes, instants, polling) |
-
-## Fix round 3 — backend compile, batch restart & CI delivery, 2026-11-14
-
-A third review confirmed remaining compilation issues, Spring Batch restart semantics, and repository artifacts:
-
-1. **`ValidationService.java` checked exception fixed:** `counts = mapper.writeValueAsString(...)` at line 128 is now explicitly wrapped in a try-catch throwing `IllegalStateException`, resolving the Java checked `JsonProcessingException` compilation blocker.
-2. **`UatService.java` string quoting fixed:** escaped the double quotes around `T` and `Z` in the SQL date format string (`'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'`), resolving the Java syntax error.
-3. **Spring Batch restartability preserved in `RunRecovery.java`:** replaced `BatchStatus.ABANDONED` with `BatchStatus.FAILED` and `ExitStatus.FAILED`. Under Spring Batch 5.2 semantics, an `ABANDONED` execution permanently refuses restarts; marking it `FAILED` allows `JobLauncher` to restart the same `JobInstance` from its checkpoint on resume.
-4. **Added `.github/workflows/ci.yml`:** checked in the GitHub Actions workflow configuring Java 21, PostgreSQL 16 service, Maven verification (`./mvnw -B verify`), and Node.js 22 frontend verification (`npm test`, `npm run build`).
-5. **Protected persistent volumes in `scripts/smoke-compose.sh`:** isolated the smoke test run under `PROJECT="${SMOKE_PROJECT:-migrateflow-smoke}"`, ensuring that the cleanup `down -v` only removes disposable smoke project volumes and never touches developer `pgdata` or `uploads` volumes.
-6. **Workspace state restoration:** added `GET /api/v1/projects/{projectId}/workflow` in `ProjectController.java` to return persisted stage IDs (`bundleId`, `mappingRevisionId`, `ruleSetRevisionId`, `snapshotId`, `manifestId`, `rehearsalRunId`, `approvalId`, `cutoverRunId`). In `Workspace.tsx`, state is now automatically hydrated on project load.
-7. **Post-cutover integrity alerting in UI:** updated `RunPanel.tsx` to prominently flag integrity check failures when subsequent reconciliation detects target data tampering, distinguishing historical run completion (`VERIFIED`) from current target verification status (`FAIL`).
-8. **Real Spring Batch step restart verified in `ProcessRecoveryTest.java`:** added `staleBatchExecutionLeftStartedIsMarkedFailedAndRestartsSuccessfully()` asserting that stale batch executions marked `FAILED` are successfully restarted to `VERIFIED` via the restart API.
