@@ -97,7 +97,7 @@ public class ApprovalController {
                         + "uat_evidence_hash, decision, comment, reviewer_id) VALUES (?,?,?,?,?,?,?,?)",
                 id, manifestId, body.rehearsalRunId(), body.reconciliationReportId(),
                 body.uatEvidenceHash(), decision, body.comment(), actor.id());
-        audit.record(projectId, actor.id(), "APPROVAL_" + decision, "manifest", manifestId,
+        audit.record(projectId, actor.id(), "APPROVAL_" + body.decision(), "manifest", manifestId,
                 Map.of("approvalId", id.toString(), "rehearsalRunId", body.rehearsalRunId().toString()));
         return ResponseEntity.status(HttpStatus.CREATED).body(Map.of(
                 "approvalId", id.toString(), "decision", decision, "manifestId", manifestId.toString(),

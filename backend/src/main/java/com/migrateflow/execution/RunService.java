@@ -102,15 +102,10 @@ public class RunService {
         Map<String, Object> manifest = manifestRow(manifestId);
         UUID projectId = (UUID) manifest.get("project_id");
         CutoverLaunch launch = txTemplate.execute(status -> {
-            // Lock project and verify no active sibling runs (MF-012)
+            // Lock project row
             jdbc.queryForObject("SELECT id FROM control.projects WHERE id = ? FOR UPDATE", UUID.class, projectId);
-            Long siblings = jdbc.queryForObject(
-                    "SELECT count(*) FROM control.runs WHERE project_id = ? AND status IN ('QUEUED','RUNNING')",
-                    Long.class, projectId);
-            if (siblings != null && siblings > 0) {
-                throw ApiException.conflict("JOB_ALREADY_RUNNING", "This project already has an active run");
-            }
 
+            // Check idempotency first: an identical replay should return the existing run without conflict (T15)
             if (idempotencyKey != null && !idempotencyKey.isBlank()) {
                 List<Map<String, Object>> existing = jdbc.queryForList(
                         "SELECT id, manifest_id, approval_id FROM control.runs WHERE project_id = ? AND request_key = ?", projectId, idempotencyKey);
@@ -122,6 +117,14 @@ public class RunService {
                     // Idempotent replay: return the existing run WITHOUT relaunching it.
                     return new CutoverLaunch((UUID) existing.get(0).get("id"), false);
                 }
+            }
+
+            // Verify no active sibling runs (MF-012)
+            Long siblings = jdbc.queryForObject(
+                    "SELECT count(*) FROM control.runs WHERE project_id = ? AND status IN ('QUEUED','RUNNING')",
+                    Long.class, projectId);
+            if (siblings != null && siblings > 0) {
+                throw ApiException.conflict("JOB_ALREADY_RUNNING", "This project already has an active run");
             }
             Map<String, Object> slot = jdbc.queryForMap(
                     "SELECT status, active_run_id FROM control.target_cutover_slot WHERE slot_id = 1 FOR UPDATE");
