@@ -61,7 +61,9 @@ public class AuthController {
         try {
             Authentication auth = authManager.authenticate(
                     new UsernamePasswordAuthenticationToken(body.email().toLowerCase(), body.password()));
-            req.changeSessionId();
+            if (req.getSession(false) != null) {
+                req.changeSessionId();
+            }
             SecurityContext context = SecurityContextHolder.createEmptyContext();
             context.setAuthentication(auth);
             SecurityContextHolder.setContext(context);

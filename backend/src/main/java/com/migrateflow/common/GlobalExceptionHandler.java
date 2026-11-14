@@ -60,7 +60,7 @@ public class GlobalExceptionHandler {
     }
 
     @ExceptionHandler({IllegalArgumentException.class, java.time.format.DateTimeParseException.class})
-    public ResponseEntity<ProblemDetail> badArgument(Exception ex, HttpServletRequest req) {
+    public ResponseEntity<ProblemDetail> badArgument(RuntimeException ex, HttpServletRequest req) {
         return problem(HttpStatus.BAD_REQUEST, "INVALID_ARGUMENT", ex.getMessage(), req);
     }
 
