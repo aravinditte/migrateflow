@@ -186,6 +186,7 @@ public class RunService {
 
     public void restart(AppUser actor, UUID runId) {
         Map<String, Object> run = runRow(runId);
+        UUID projectId = (UUID) run.get("project_id");
         if ("CUTOVER".equals(run.get("kind"))) {
             UUID activeRun = jdbc.queryForObject(
                     "SELECT active_run_id FROM control.target_cutover_slot WHERE slot_id = 1", UUID.class);
@@ -193,15 +194,26 @@ public class RunService {
                 throw ApiException.conflict("JOB_NOT_RESTARTABLE", "The cutover slot no longer belongs to this run");
             }
         }
-        // Atomic claim: exactly one caller can move the run out of
-        // FAILED_RESTARTABLE; a concurrent restart loses here, not later.
-        int claimed = jdbc.update(
-                "UPDATE control.runs SET status = 'QUEUED', error_message = NULL WHERE id = ? AND status = 'FAILED_RESTARTABLE'",
-                runId);
-        if (claimed == 0) {
-            throw ApiException.conflict("JOB_NOT_RESTARTABLE", "Only a failed restartable run can be restarted");
-        }
-        audit.record((UUID) run.get("project_id"), actor.id(), "RUN_RESTARTED", "run", runId, Map.of());
+        // Same single-worker discipline as launch (spec 3.3): under the
+        // project row lock, refuse when a sibling run is active, then claim
+        // FAILED_RESTARTABLE -> QUEUED with one conditional update so a
+        // concurrent restart or launch cannot interleave.
+        txTemplate.executeWithoutResult(status -> {
+            jdbc.queryForObject("SELECT id FROM control.projects WHERE id = ? FOR UPDATE", UUID.class, projectId);
+            Long siblings = jdbc.queryForObject(
+                    "SELECT count(*) FROM control.runs WHERE project_id = ? AND id <> ? AND status IN ('QUEUED','RUNNING')",
+                    Long.class, projectId, runId);
+            if (siblings != null && siblings > 0) {
+                throw ApiException.conflict("JOB_ALREADY_RUNNING", "This project already has an active run");
+            }
+            int claimed = jdbc.update(
+                    "UPDATE control.runs SET status = 'QUEUED', error_message = NULL WHERE id = ? AND status = 'FAILED_RESTARTABLE'",
+                    runId);
+            if (claimed == 0) {
+                throw ApiException.conflict("JOB_NOT_RESTARTABLE", "Only a failed restartable run can be restarted");
+            }
+        });
+        audit.record(projectId, actor.id(), "RUN_RESTARTED", "run", runId, Map.of());
         executor.execute(() -> executeRun(runId));
     }
 
