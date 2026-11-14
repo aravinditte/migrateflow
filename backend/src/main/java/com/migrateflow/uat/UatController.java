@@ -35,7 +35,7 @@ public class UatController {
         this.audit = audit;
     }
 
-    public record ExecutionRequest(@NotBlank String caseKey, @NotBlank String result, String actualResult) {}
+    public record ExecutionRequest(@NotBlank String caseKey, @NotBlank String result, @NotBlank String actualResult) {}
     public record DefectRequest(String caseKey, @NotBlank String severity, @NotBlank String description) {}
     public record DefectPatchRequest(@NotBlank String status, String resolutionNote) {}
 
@@ -50,6 +50,7 @@ public class UatController {
                 "uatEvidenceHash", uat.uatEvidenceHash(runId));
     }
 
+    @org.springframework.transaction.annotation.Transactional
     @PostMapping("/rehearsals/{runId}/uat-executions")
     public ResponseEntity<Map<String, Object>> execute(@PathVariable UUID runId,
                                                        @Valid @RequestBody ExecutionRequest body, Authentication auth) {
@@ -57,8 +58,13 @@ public class UatController {
         UUID projectId = access.projectOfRun(runId);
         access.requireProjectRole(actor, projectId, "REVIEWER");
         access.requireActiveProject(projectId);
+        // MF-A05: Lock rehearsal run during UAT case execution
+        jdbc.queryForObject("SELECT id FROM control.runs WHERE id = ? FOR UPDATE", UUID.class, runId);
         if (!List.of("PASS", "FAIL", "BLOCKED").contains(body.result())) {
             throw ApiException.badRequest("INVALID_RESULT", "result must be PASS, FAIL or BLOCKED");
+        }
+        if (body.actualResult() == null || body.actualResult().trim().isBlank()) {
+            throw ApiException.badRequest("ACTUAL_RESULT_REQUIRED", "actualResult must not be blank and must state the observation or evidence");
         }
         UUID caseId = jdbc.query("SELECT id FROM control.uat_cases WHERE rehearsal_run_id = ? AND case_key = ?",
                 (rs, n) -> rs.getObject("id", UUID.class), runId, body.caseKey()).stream().findFirst()
@@ -69,9 +75,10 @@ public class UatController {
         audit.record(projectId, actor.id(), "UAT_EXECUTED", "uat_case", caseId,
                 Map.of("runId", runId.toString(), "result", body.result()));
         return ResponseEntity.status(HttpStatus.CREATED).body(Map.of(
-                "executionId", id.toString(), "caseKey", body.caseKey(), "result", body.result()));
+            "executionId", id.toString(), "caseKey", body.caseKey(), "result", body.result()));
     }
 
+    @org.springframework.transaction.annotation.Transactional
     @PostMapping("/rehearsals/{runId}/defects")
     public ResponseEntity<Map<String, Object>> openDefect(@PathVariable UUID runId,
                                                           @Valid @RequestBody DefectRequest body, Authentication auth) {
@@ -79,6 +86,8 @@ public class UatController {
         UUID projectId = access.projectOfRun(runId);
         access.requireProjectRole(actor, projectId, "REVIEWER");
         access.requireActiveProject(projectId);
+        // MF-A05: Lock rehearsal run during defect creation
+        jdbc.queryForObject("SELECT id FROM control.runs WHERE id = ? FOR UPDATE", UUID.class, runId);
         if (!List.of("BLOCKER", "CRITICAL", "MAJOR", "MINOR").contains(body.severity())) {
             throw ApiException.badRequest("INVALID_SEVERITY", "Unknown severity " + body.severity());
         }
@@ -96,16 +105,23 @@ public class UatController {
                 "defectId", id.toString(), "status", "OPEN", "severity", body.severity()));
     }
 
+    @org.springframework.transaction.annotation.Transactional
     @PatchMapping("/defects/{defectId}")
     public Map<String, Object> patchDefect(@PathVariable UUID defectId,
                                            @Valid @RequestBody DefectPatchRequest body, Authentication auth) {
         AppUser actor = SecurityConfig.requireUser(users, auth);
         Map<String, Object> defect = jdbc.queryForMap(
-                "SELECT rehearsal_run_id, uat_case_id, status, resolved_at FROM control.defects WHERE id = ?", defectId);
+                "SELECT rehearsal_run_id, uat_case_id, status, resolved_at FROM control.defects WHERE id = ? FOR UPDATE", defectId);
         UUID runId = (UUID) defect.get("rehearsal_run_id");
         UUID projectId = access.projectOfRun(runId);
         access.requireProjectRole(actor, projectId, "REVIEWER");
         access.requireActiveProject(projectId);
+        // MF-A05: Lock rehearsal run
+        jdbc.queryForObject("SELECT id FROM control.runs WHERE id = ? FOR UPDATE", UUID.class, runId);
+        // MF-A23: Enforce defect state machine: CLOSED cannot regress to RESOLVED
+        if ("CLOSED".equals(defect.get("status"))) {
+            throw ApiException.conflict("DEFECT_ALREADY_CLOSED", "Defect is already closed and cannot be resolved or modified again");
+        }
         String target = body.status();
         if (!List.of("RESOLVED", "CLOSED").contains(target)) {
             throw ApiException.badRequest("INVALID_STATUS", "Defect can only move to RESOLVED or CLOSED");

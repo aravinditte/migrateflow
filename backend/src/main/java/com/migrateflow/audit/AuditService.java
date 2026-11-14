@@ -22,7 +22,7 @@ public class AuditService {
             try {
                 json = mapper.writeValueAsString(metadata);
             } catch (JsonProcessingException e) {
-                json = "{\"note\":\"metadata not serializable\"}";
+                throw new IllegalStateException("Failed to serialize audit metadata for action " + action + ": " + e.getMessage(), e);
             }
         }
         jdbc.update("INSERT INTO control.audit_events (id, project_id, actor_id, action, entity_type, entity_id, metadata_json) "

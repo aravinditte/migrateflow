@@ -113,12 +113,34 @@ public class ProjectController {
             ruleSetRevisionId = (UUID) m.get("rule_set_revision_id");
             snapshotId = (UUID) m.get("snapshot_id");
 
-            rehearsalRunId = querySingleId(
-                    "SELECT id FROM control.runs WHERE manifest_id = ? AND kind = 'REHEARSAL' ORDER BY created_at DESC LIMIT 1", manifestId);
-            approvalId = querySingleId(
-                    "SELECT id FROM control.approvals WHERE manifest_id = ? AND decision = 'APPROVED' ORDER BY signed_at DESC LIMIT 1", manifestId);
-            cutoverRunId = querySingleId(
-                    "SELECT id FROM control.runs WHERE manifest_id = ? AND kind = 'CUTOVER' ORDER BY created_at DESC LIMIT 1", manifestId);
+            // Coherent linked state (MF-A43): cutover -> approval -> rehearsal
+            List<Map<String, Object>> cutovers = jdbc.queryForList(
+                    "SELECT id, approval_id FROM control.runs WHERE manifest_id = ? AND kind = 'CUTOVER' ORDER BY created_at DESC, id DESC LIMIT 1",
+                    manifestId);
+            if (!cutovers.isEmpty()) {
+                cutoverRunId = (UUID) cutovers.get(0).get("id");
+                approvalId = (UUID) cutovers.get(0).get("approval_id");
+                if (approvalId != null) {
+                    rehearsalRunId = querySingleId(
+                            "SELECT rehearsal_run_id FROM control.approvals WHERE id = ?", approvalId);
+                }
+            }
+
+            if (approvalId == null) {
+                List<Map<String, Object>> approvals = jdbc.queryForList(
+                        "SELECT id, rehearsal_run_id FROM control.approvals WHERE manifest_id = ? AND decision = 'APPROVED' ORDER BY signed_at DESC, id DESC LIMIT 1",
+                        manifestId);
+                if (!approvals.isEmpty()) {
+                    approvalId = (UUID) approvals.get(0).get("id");
+                    rehearsalRunId = (UUID) approvals.get(0).get("rehearsal_run_id");
+                }
+            }
+
+            if (rehearsalRunId == null) {
+                rehearsalRunId = querySingleId(
+                        "SELECT id FROM control.runs WHERE manifest_id = ? AND kind = 'REHEARSAL' ORDER BY created_at DESC, id DESC LIMIT 1",
+                        manifestId);
+            }
         } else {
             manifestId = null;
             manifestHash = "";
@@ -163,6 +185,8 @@ public class ProjectController {
     public Map<String, Object> archive(@PathVariable UUID projectId, Authentication auth) {
         AppUser actor = SecurityConfig.requireUser(users, auth);
         access.requireProjectRole(actor, projectId, "ENGINEER");
+        // MF-A19: Lock project row to prevent race with run launches
+        jdbc.queryForObject("SELECT id FROM control.projects WHERE id = ? FOR UPDATE", UUID.class, projectId);
         Long active = jdbc.queryForObject("SELECT count(*) FROM control.runs WHERE project_id = ? AND status IN ('QUEUED','RUNNING')",
                 Long.class, projectId);
         if (active != null && active > 0) {

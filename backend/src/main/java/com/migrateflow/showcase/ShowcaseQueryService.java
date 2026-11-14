@@ -34,17 +34,41 @@ public class ShowcaseQueryService {
     private final ShowcaseRegistryService registry;
     private final UatService uat;
     private final ObjectMapper mapper = new ObjectMapper();
+    private final ObjectMapper canonicalMapper = com.fasterxml.jackson.databind.json.JsonMapper.builder()
+            .enable(com.fasterxml.jackson.databind.SerializationFeature.ORDER_MAP_ENTRIES_BY_KEYS)
+            .enable(com.fasterxml.jackson.databind.MapperFeature.SORT_PROPERTIES_ALPHABETICALLY)
+            .build();
     private final String slug;
+
+    private record LineageCache(Scenario scenario, List<String> problems, long checkedAtMillis) {}
+    private volatile LineageCache lineageCache = null;
+    private final long lineageCacheTtlMs;
 
     public static final String SYNTHETIC_CUSTOMERS_SHA256 = "696c90e871d5c67b70ee8cdd1abd0175b37bb442a59bf31f1aea55782c8067cd";
     public static final String SYNTHETIC_ORDERS_SHA256 = "133c1ea3262e19369a2b2db29c24899fed1da2c74a36f50bc2547639dc7a441d";
 
     public ShowcaseQueryService(JdbcTemplate jdbc, ShowcaseRegistryService registry, UatService uat,
-                                @Value("${migrateflow.showcase.slug:hinata-trading}") String slug) {
+                                @Value("${migrateflow.showcase.slug:hinata-trading}") String slug,
+                                @Value("${migrateflow.showcase.lineage-cache-ttl-ms:0}") long lineageCacheTtlMs) {
         this.jdbc = jdbc;
         this.registry = registry;
         this.uat = uat;
         this.slug = slug;
+        this.lineageCacheTtlMs = lineageCacheTtlMs;
+    }
+
+    public void clearLineageCache() {
+        this.lineageCache = null;
+    }
+
+    public static String sanitizeFailureMessage(String raw) {
+        if (raw == null || raw.isBlank()) return null;
+        String s = raw.replaceAll("(?i)(password|token|secret)[=:]\\s*[^\\s,;]+", "$1=***");
+        s = s.replaceAll("https?://[^/\\s]+", "http://backend");
+        if (s.length() > 300) {
+            s = s.substring(0, 297) + "...";
+        }
+        return s;
     }
 
     public static String maskEmail(String email) {
@@ -134,7 +158,7 @@ public class ShowcaseQueryService {
                 cutoverEvidenceHash == null ? null : cutoverEvidenceHash.trim());
 
         return new ShowcaseDto.Overview(slug, "PUBLIC_READ_ONLY", "SYNTHETIC", state, s.setupStep(),
-                integrity, problems, String.valueOf(java.time.Instant.now()), s.failureMessage(),
+                integrity, problems, String.valueOf(java.time.Instant.now()), sanitizeFailureMessage(s.failureMessage()),
                 new ShowcaseDto.BackendRef(true), project, counts, rehearsal, cutover, money, verification);
     }
 
@@ -168,7 +192,7 @@ public class ShowcaseQueryService {
     private Map<String, Object> latestReport(UUID runId) {
         return jdbc.queryForList(
                 "SELECT id, status, summary_json::text AS summary, evidence_hash, completed_at "
-                        + "FROM control.reconciliation_reports WHERE run_id = ? ORDER BY completed_at DESC LIMIT 1",
+                        + "FROM control.reconciliation_reports WHERE run_id = ? ORDER BY completed_at DESC, id DESC LIMIT 1",
                 runId).stream().findFirst().orElse(null);
     }
 
@@ -207,7 +231,11 @@ public class ShowcaseQueryService {
                 Map.of("snapshotId", str(s.snapshotId()), "status", str(snapshotStatus))));
 
         Long excludedCount = s.snapshotId() == null ? 0L : jdbc.queryForObject(
-                "SELECT count(DISTINCT (kind, source_row_id)) FROM control.exclusion_decisions WHERE snapshot_id = ? AND decision = 'EXCLUDE'",
+                "SELECT count(*) FROM ("
+                        + " SELECT DISTINCT ON (kind, source_row_id) decision"
+                        + " FROM control.exclusion_decisions WHERE snapshot_id = ?"
+                        + " ORDER BY kind, source_row_id, decided_at DESC, id DESC"
+                        + ") latest WHERE latest.decision = 'EXCLUDE'",
                 Long.class, s.snapshotId());
         long excluded = excludedCount == null ? 0L : excludedCount;
         long invalidTotal = 0;
@@ -296,7 +324,7 @@ public class ShowcaseQueryService {
                 + "FROM control.validation_issues i "
                 + "LEFT JOIN LATERAL (SELECT decision, reason, reviewer_id FROM control.exclusion_decisions dd "
                 + "  WHERE dd.snapshot_id = i.snapshot_id AND dd.kind = i.kind AND dd.source_row_id = i.source_row_id "
-                + "  ORDER BY dd.decided_at DESC LIMIT 1) d ON true "
+                + "  ORDER BY dd.decided_at DESC, dd.id DESC LIMIT 1) d ON true "
                 + "LEFT JOIN control.users u ON u.id = d.reviewer_id "
                 + "WHERE i.snapshot_id = ? AND i.severity = 'ERROR'"
                 + (code == null || code.isBlank() ? "" : " AND i.code = ?")
@@ -499,18 +527,28 @@ public class ShowcaseQueryService {
     // ------------------------------------------------------------------
 
     public List<String> verifyLineage(Scenario s) {
+        LineageCache cached = lineageCache;
+        if (lineageCacheTtlMs > 0 && cached != null && cached.scenario().equals(s)
+                && (System.currentTimeMillis() - cached.checkedAtMillis() < lineageCacheTtlMs)) {
+            return cached.problems();
+        }
         List<String> problems = new ArrayList<>();
         if (s.projectId() == null || s.bundleId() == null || s.snapshotId() == null || s.manifestId() == null
                 || s.rehearsalRunId() == null || s.cutoverRunId() == null || s.approvalId() == null) {
             problems.add("showcase registry is missing one or more artifact links");
+            if (lineageCacheTtlMs > 0) {
+                lineageCache = new LineageCache(s, problems, System.currentTimeMillis());
+            }
             return problems;
         }
         check(problems, "bundle belongs to another project",
                 "SELECT count(*) FROM control.dataset_bundles WHERE id = ? AND project_id = ?", s.bundleId(), s.projectId());
         check(problems, "mapping revision belongs to another project",
                 "SELECT count(*) FROM control.mapping_revisions WHERE id = ? AND project_id = ?", s.mappingRevisionId(), s.projectId());
-        check(problems, "snapshot belongs to another project",
-                "SELECT count(*) FROM control.validation_snapshots WHERE id = ? AND project_id = ?", s.snapshotId(), s.projectId());
+        check(problems, "snapshot does not match showcase project/bundle/mapping/rules",
+                "SELECT count(*) FROM control.validation_snapshots WHERE id = ? AND project_id = ? "
+                        + "AND bundle_id = ? AND mapping_revision_id = ? AND rule_set_revision_id = ?",
+                s.snapshotId(), s.projectId(), s.bundleId(), s.mappingRevisionId(), s.ruleSetRevisionId());
         check(problems, "manifest does not bind the showcase bundle/mapping/rules/snapshot",
                 "SELECT count(*) FROM control.manifests WHERE id = ? AND project_id = ? AND bundle_id = ? "
                         + "AND mapping_revision_id = ? AND rule_set_revision_id = ? AND snapshot_id = ?",
@@ -530,14 +568,50 @@ public class ShowcaseQueryService {
         Map<String, Object> cutoverReport = latestReport(s.cutoverRunId());
         if (rehearsalReport == null || !"PASS".equals(rehearsalReport.get("status"))) {
             problems.add("latest rehearsal reconciliation report is not PASS");
+        } else {
+            try {
+                Map<String, Object> map = canonicalMapper.readValue(
+                        String.valueOf(rehearsalReport.get("summary")),
+                        new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {});
+                String recomputed = com.migrateflow.common.CanonicalHash.sha256Hex(
+                        canonicalMapper.writeValueAsString(map));
+                String stored = (String) rehearsalReport.get("evidence_hash");
+                if (stored != null && !stored.trim().equalsIgnoreCase(recomputed)) {
+                    problems.add("rehearsal report evidence hash does not match canonical summary JSON");
+                }
+            } catch (Exception ex) {
+                problems.add("failed to recompute rehearsal report evidence hash: " + ex.getMessage());
+            }
         }
         if (cutoverReport == null || !"PASS".equals(cutoverReport.get("status"))) {
             problems.add("latest cutover reconciliation report is not PASS");
+        } else {
+            try {
+                Map<String, Object> map = canonicalMapper.readValue(
+                        String.valueOf(cutoverReport.get("summary")),
+                        new com.fasterxml.jackson.core.type.TypeReference<Map<String, Object>>() {});
+                String recomputed = com.migrateflow.common.CanonicalHash.sha256Hex(
+                        canonicalMapper.writeValueAsString(map));
+                String stored = (String) cutoverReport.get("evidence_hash");
+                if (stored != null && !stored.trim().equalsIgnoreCase(recomputed)) {
+                    problems.add("cutover report evidence hash does not match canonical summary JSON");
+                }
+            } catch (Exception ex) {
+                problems.add("failed to recompute cutover report evidence hash: " + ex.getMessage());
+            }
         }
         List<Map<String, Object>> bundleFiles = jdbc.queryForList(
                 "SELECT kind, sha256 FROM control.source_files WHERE bundle_id = ?", s.bundleId());
         if (bundleFiles.isEmpty()) {
             problems.add("no source files found for bundle " + s.bundleId());
+        }
+        long customersFiles = bundleFiles.stream().filter(f -> "CUSTOMERS".equals(f.get("kind"))).count();
+        long ordersFiles = bundleFiles.stream().filter(f -> "ORDERS".equals(f.get("kind"))).count();
+        if (customersFiles != 1) {
+            problems.add("bundle must contain exactly 1 CUSTOMERS file (found: " + customersFiles + ")");
+        }
+        if (ordersFiles != 1) {
+            problems.add("bundle must contain exactly 1 ORDERS file (found: " + ordersFiles + ")");
         }
         for (Map<String, Object> f : bundleFiles) {
             String kind = (String) f.get("kind");
@@ -594,9 +668,19 @@ public class ShowcaseQueryService {
         }
         if (cutoverReport != null) {
             long written = summaryNode(cutoverReport).path("orders").path("writtenAmountYen").asLong(-1);
+            long accepted = summaryNode(cutoverReport).path("orders").path("acceptedAmountYen").asLong(-1);
             long sum = jdbc.queryForObject("SELECT COALESCE(SUM(amount_yen),0) FROM target.orders", Long.class);
             if (written != sum) {
                 problems.add("target order total " + sum + " != reconciled written total " + written);
+            }
+            long expectedAcceptedAmount = jdbc.queryForObject(
+                    "SELECT COALESCE(SUM(amount_yen),0) FROM stage.order_validated_rows "
+                            + "WHERE snapshot_id = ? AND is_valid = TRUE AND input_row_id NOT IN ("
+                            + "  SELECT DISTINCT ON (kind, source_row_id) source_row_id FROM control.exclusion_decisions "
+                            + "  WHERE snapshot_id = ? AND kind = 'ORDERS' ORDER BY kind, source_row_id, decided_at DESC, id DESC"
+                            + ")", Long.class, s.snapshotId(), s.snapshotId());
+            if (accepted != expectedAcceptedAmount) {
+                problems.add("reconciled accepted order total " + accepted + " != expected snapshot accepted amount " + expectedAcceptedAmount);
             }
         }
         long applied = jdbc.queryForObject(
@@ -604,6 +688,9 @@ public class ShowcaseQueryService {
         if (applied != counts.acceptedCustomers() + counts.acceptedOrders()) {
             problems.add("applied-rows ledger for the cutover holds " + applied + " rows, expected "
                     + (counts.acceptedCustomers() + counts.acceptedOrders()));
+        }
+        if (lineageCacheTtlMs > 0) {
+            lineageCache = new LineageCache(s, problems, System.currentTimeMillis());
         }
         return problems;
     }

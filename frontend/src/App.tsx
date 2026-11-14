@@ -21,6 +21,10 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (import.meta.env.VITE_PUBLIC_SHOWCASE === 'true') {
+      setLoading(false);
+      return;
+    }
     api.get<SessionUser>('/api/v1/auth/me')
       .then(async (me) => {
         setUser(me);
@@ -45,7 +49,7 @@ export default function App() {
           <Login onLogin={async (me) => { setUser(me); await loadProjects(); }} />
         </main>
       )
-      : <PublicShowcase onSignIn={() => setShowLogin(true)} />;
+      : <PublicShowcase onSignIn={import.meta.env.VITE_PUBLIC_SHOWCASE === 'true' ? undefined : () => setShowLogin(true)} />;
   }
 
   return (

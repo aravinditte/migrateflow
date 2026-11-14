@@ -54,7 +54,7 @@ public class ManifestService {
 
         Map<String, Map<String, Object>> latest = new LinkedHashMap<>();
         jdbc.query("SELECT kind, source_row_id, decision, reason, reviewer_id FROM control.exclusion_decisions "
-                        + "WHERE snapshot_id = ? ORDER BY decided_at ASC",
+                        + "WHERE snapshot_id = ? ORDER BY decided_at ASC, id ASC",
                 (rs, n) -> {
                     String key = rs.getString("kind") + ":" + rs.getObject("source_row_id", UUID.class);
                     Map<String, Object> d = new LinkedHashMap<>();

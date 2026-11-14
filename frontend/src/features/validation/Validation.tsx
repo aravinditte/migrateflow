@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { api, Page } from '../../lib/api';
 import { pollUntil } from '../../lib/format';
 import { message, SectionProps } from '../workspace/flow';
@@ -10,6 +10,35 @@ export default function Validation({ projectId, flow, patch, setError }: Section
   const [issues, setIssues] = useState<Issue[]>([]);
   const [issuePage, setIssuePage] = useState(0);
   const [hasMoreIssues, setHasMoreIssues] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    setSnapshot(null);
+    setIssues([]);
+    setIssuePage(0);
+    setHasMoreIssues(false);
+    if (!flow.snapshotId) return;
+
+    api.get<{ status: string; counts: string }>(`/api/v1/validation-snapshots/${flow.snapshotId}`)
+      .then((s) => {
+        if (!cancelled) {
+          setSnapshot(s);
+          if (s.status === 'COMPLETED') {
+            api.get<Page<Issue>>(`/api/v1/validation-snapshots/${flow.snapshotId}/issues?page=0&size=50`)
+              .then((res) => {
+                if (!cancelled) {
+                  setIssues(res.content);
+                  setHasMoreIssues(res.content.length === 50);
+                }
+              })
+              .catch(() => undefined);
+          }
+        }
+      })
+      .catch(() => undefined);
+
+    return () => { cancelled = true; };
+  }, [flow.snapshotId]);
 
   const loadIssues = async (snapshotId: string, pageNum: number) => {
     const res = await api.get<Page<Issue>>(`/api/v1/validation-snapshots/${snapshotId}/issues?page=${pageNum}&size=50`);
@@ -52,7 +81,7 @@ export default function Validation({ projectId, flow, patch, setError }: Section
         <>
           <IssueTable issues={issues} />
           <div style={{ marginTop: '1rem', display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
-            <button disabled={issuePage === 0} onClick={() => { const p = Math.max(0, issuePage - 1); setIssuePage(p); const sid = flow.snapshotId || snapshot?.counts; if (flow.snapshotId) loadIssues(flow.snapshotId, p); }}>Previous</button>
+            <button disabled={issuePage === 0} onClick={() => { const p = Math.max(0, issuePage - 1); setIssuePage(p); if (flow.snapshotId) loadIssues(flow.snapshotId, p); }}>Previous</button>
             <span>Page {issuePage + 1}</span>
             <button disabled={!hasMoreIssues} onClick={() => { const p = issuePage + 1; setIssuePage(p); if (flow.snapshotId) loadIssues(flow.snapshotId, p); }}>Next</button>
           </div>

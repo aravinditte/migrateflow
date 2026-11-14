@@ -91,6 +91,7 @@ public class AuthController {
         return userView(user);
     }
 
+    @org.springframework.transaction.annotation.Transactional
     @PostMapping("/admin/users")
     public ResponseEntity<Map<String, Object>> createUser(@Valid @RequestBody CreateUserRequest body, Authentication auth) {
         AppUser actor = SecurityConfig.requireUser(users, auth);
@@ -106,6 +107,7 @@ public class AuthController {
         return ResponseEntity.status(HttpStatus.CREATED).body(userView(created));
     }
 
+    @org.springframework.transaction.annotation.Transactional
     @PutMapping("/projects/{projectId}/members/{userId}")
     public Map<String, Object> setMembership(@PathVariable UUID projectId, @PathVariable UUID userId,
                                              @Valid @RequestBody MembershipRequest body, Authentication auth) {
@@ -122,13 +124,17 @@ public class AuthController {
     }
 
     private Map<String, Object> userView(AppUser user) {
-        List<Map<String, Object>> projects = jdbc.query(
-                "SELECT p.id, p.name, p.status FROM control.projects p "
-                        + "LEFT JOIN control.project_memberships m ON m.project_id = p.id AND m.user_id = ? AND m.active = TRUE "
-                        + "WHERE m.id IS NOT NULL OR p.created_by = ? ORDER BY p.created_at",
-                (rs, n) -> Map.<String, Object>of("id", rs.getObject("id", UUID.class).toString(),
-                        "name", rs.getString("name"), "status", rs.getString("status")),
-                user.id(), user.id());
+        // MF-A31: Align user project list with effective access control
+        String sql = "ADMIN".equals(user.role())
+                ? "SELECT p.id, p.name, p.status FROM control.projects p ORDER BY p.created_at"
+                : "SELECT p.id, p.name, p.status FROM control.projects p "
+                    + "JOIN control.project_memberships m ON m.project_id = p.id AND m.user_id = ? AND m.active = TRUE "
+                    + "ORDER BY p.created_at";
+        List<Map<String, Object>> projects = "ADMIN".equals(user.role())
+                ? jdbc.query(sql, (rs, n) -> Map.<String, Object>of("id", rs.getObject("id", UUID.class).toString(),
+                        "name", rs.getString("name"), "status", rs.getString("status")))
+                : jdbc.query(sql, (rs, n) -> Map.<String, Object>of("id", rs.getObject("id", UUID.class).toString(),
+                        "name", rs.getString("name"), "status", rs.getString("status")), user.id());
         return Map.of("id", user.id().toString(), "email", user.email(), "displayName", user.displayName(),
                 "role", user.role(), "projects", projects);
     }

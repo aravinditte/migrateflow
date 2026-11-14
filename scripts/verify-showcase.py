@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """
-Independent read-only verification of the public MigrateFlow showcase
+Bounded independent read-only verification of the public MigrateFlow showcase
 (Automated Showcase spec, sections 5.4/9/11). Uses ONLY the anonymous
 public GET API plus the checked-in fixture expectations; it never signs
-in and never writes. Exits non-zero and prints every mismatch when the
-displayed evidence is not authentic and internally consistent.
+in and never writes. Verifies aggregate metrics, lineage hashes, exclusion
+counts, pagination, and evidence integrity against persisted backend artifacts.
+Exits non-zero and prints every mismatch when the displayed evidence is not
+authentic and internally consistent.
 
 Usage:  python3 scripts/verify-showcase.py [base-url]
         (default base URL http://localhost:8081, or MIGRATEFLOW_BASE_URL)
@@ -150,7 +152,7 @@ def main():
         for p in problems:
             print(f"  - {p}")
         sys.exit(1)
-    print("\nShowcase verification passed: every displayed figure traces to a real persisted artifact.")
+    print("\nShowcase verification passed: bounded public read-model verification confirmed against persisted artifacts.")
 
 
 if __name__ == "__main__":

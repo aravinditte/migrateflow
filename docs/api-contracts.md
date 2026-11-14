@@ -9,11 +9,11 @@ with a stable machine-readable `code`.
 |---|---|---|
 | `POST /auth/login`, `POST /auth/logout`, `GET /auth/me` | any | Session lifecycle |
 | `POST /admin/users`, `PUT /projects/{id}/members/{userId}` | ADMIN | User and membership admin |
-| `POST /projects`, `GET /projects`, `GET /projects/{id}`, `PATCH /projects/{id}` | member | Project lifecycle (archive blocked while a run is active) |
+| `POST /projects`, `GET /projects`, `GET /projects/{id}`, `POST /projects/{id}/archive` | member | Project lifecycle (archive blocked while a run is active) |
 | `POST /projects/{id}/bundles` (multipart `customers`, `orders`) | ENGINEER | Paired CSV intake |
-| `GET /projects/{id}/bundles/{bundleId}` | member | Bundle profile (hashes, counts) |
-| `GET /projects/{id}/files/{fileId}/rows` | member | Paged raw-row preview |
-| `GET /projects/{id}/files/{fileId}/download` | member | Authorised source download |
+| `GET /bundles/{bundleId}/profile` | member | Bundle profile (hashes, counts) |
+| `GET /files/{fileId}/rows` | member | Paged raw-row preview |
+| `GET /files/{fileId}/download` | member | Authorised source download |
 | `POST /projects/{id}/mapping-revisions` | ENGINEER | Publish immutable mapping (empty body = default contract) |
 | `POST /projects/{id}/validation-snapshots` | ENGINEER | Start async validation (202) |
 | `GET /validation-snapshots/{id}`, `GET /validation-snapshots/{id}/issues` | member | Snapshot status/counts, filtered issues |

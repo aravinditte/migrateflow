@@ -1,14 +1,14 @@
 import { ShowcaseOverview, showcaseApi } from '../../lib/showcase';
 import { formatInstant, formatYen } from '../../lib/format';
 
-export default function ShowcaseHero({ overview, onSignIn }: { overview: ShowcaseOverview; onSignIn: () => void }) {
+export default function ShowcaseHero({ overview, onSignIn }: { overview: ShowcaseOverview; onSignIn?: () => void }) {
   const v = overview.validation;
   const total = v ? v.acceptedCustomers + v.acceptedOrders : 0;
   return (
     <section className="hero">
       <div className="hero-top">
         <h1>Migrate<span>Flow</span></h1>
-        <button className="secondary" onClick={onSignIn}>Operator sign in</button>
+        {onSignIn && <button className="secondary" onClick={onSignIn}>Operator sign in</button>}
       </div>
       <p className="hero-sub">
         Verifiable data migration from legacy CSV to PostgreSQL — imperfect source exports in,

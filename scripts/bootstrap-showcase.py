@@ -230,8 +230,24 @@ def recover_state_from_backend(admin: Client, engineer: Client, reviewer: Client
         state["registryId"] = existing.get("id")
         state["setupState"] = existing.get("setupState")
         state["setupStep"] = existing.get("setupStep")
+    elif status == 404:
+        if state:
+            print("  registry scenario does not exist on backend (fresh database); discarding stale local cache")
+            state.clear()
+            save_state(state)
+            return state, None
     elif status not in (404,):
         fail(f"registry lookup failed: HTTP {status} {existing}")
+
+    # Verify project exists on backend; if missing, cache is stale
+    pid = state.get("projectId")
+    if pid:
+        s_proj, proj = engineer.request("GET", f"/api/v1/projects/{pid}")
+        if s_proj != 200:
+            print(f"  project {pid} not found on backend (HTTP {s_proj}); discarding stale state")
+            state.clear()
+            save_state(state)
+            return state, None
 
     # Re-verify and recover bundle file profile
     bid = state.get("bundleId")
@@ -258,10 +274,14 @@ def recover_state_from_backend(admin: Client, engineer: Client, reviewer: Client
             cnts = json.loads(snap["counts"]) if isinstance(snap["counts"], str) else snap["counts"]
             state["counts"] = cnts
 
-            # Recover exclusions
+            # Recover exclusions - effective latest decision per row (MF-A09)
             s_excl, excl = reviewer.request("GET", f"/api/v1/validation-snapshots/{snid}/exclusions")
             if s_excl == 200 and "content" in excl:
-                state["decidedRows"] = sorted({f"{e['kind']}:{e['sourceRowId']}" for e in excl["content"]})
+                latest_decisions = {}
+                for e in excl["content"]:
+                    key = f"{e['kind']}:{e['sourceRowId']}"
+                    latest_decisions[key] = e.get("decision")
+                state["decidedRows"] = sorted({k for k, dec in latest_decisions.items() if dec == "EXCLUDE"})
             else:
                 state["decidedRows"] = []
 
@@ -677,14 +697,28 @@ def run_uat_checks(engineer, reviewer, state, rehearsal_summary):
         expected_total = sum(int(r[3]) for n, r in order_by_id.values() if n not in invalid_numbers["ORDERS"])
         ok = (rehearsal_summary["orders"]["acceptedAmountYen"] == expected_total
               == rehearsal_summary["orders"]["writtenAmountYen"])
+        if not ok:
+            return False, (f"total mismatch: expected ¥{expected_total:,}, got accepted "
+                          f"¥{rehearsal_summary['orders']['acceptedAmountYen']:,}, written "
+                          f"¥{rehearsal_summary['orders']['writtenAmountYen']:,}")
         samples = rehearsal_rows(engineer, run_id, "orders")[:3]
+        status_map = {"N": "NEW", "P": "PAID", "S": "SHIPPED", "C": "CANCELLED"}
+        sampled_ids = []
         for row in samples:
             _, src = order_by_id[row["externalOrderId"]]
+            sampled_ids.append(row["externalOrderId"])
+            expected_date = src[2].strip().replace("/", "-")
+            expected_status = status_map.get(src[4].strip(), src[4].strip())
             if row["amountYen"] != int(src[3]) or row["externalCustomerId"] != src[1]:
-                return False, f"{row['externalOrderId']}: target row disagrees with source {src}"
-        return ok, (f"order totals agree: source-derived expected ¥{expected_total:,}, report accepted "
-                    f"¥{rehearsal_summary['orders']['acceptedAmountYen']:,}, written "
-                    f"¥{rehearsal_summary['orders']['writtenAmountYen']:,}; 3 sampled orders match source amounts")
+                return False, f"{row['externalOrderId']}: amount/customer agrees with source {src}"
+            if row.get("orderDate") != expected_date:
+                return False, f"{row['externalOrderId']}: date {row.get('orderDate')} != source {expected_date}"
+            if row.get("status") != expected_status:
+                return False, f"{row['externalOrderId']}: status {row.get('status')} != mapped {expected_status}"
+        return True, (f"order totals agree: source-derived expected ¥{expected_total:,}, report accepted "
+                      f"¥{rehearsal_summary['orders']['acceptedAmountYen']:,}, written "
+                      f"¥{rehearsal_summary['orders']['writtenAmountYen']:,}; spot-checked orders {', '.join(sampled_ids)}: "
+                      f"customer FK, amount, ISO date and mapped status match source rows")
 
     def check_exclusions_absent():
         c_ids, o_ids = target_ids("customers"), target_ids("orders")
@@ -732,17 +766,18 @@ def run_uat_checks(engineer, reviewer, state, rehearsal_summary):
         case = cases.get(key)
         if case is None:
             fail(f"required UAT case {key} was not seeded for the rehearsal")
-        if case.get("latestResult") == "PASS":
-            print(f"  UAT {key}: already PASS, skipping")
-            continue
+        # MF-A48: Always evaluate assertion actively even on resume
         ok, actual = fn()
+        if not ok:
+            fail(f"UAT check {key} FAILED verification: {actual}")
+        if case.get("latestResult") == "PASS" and case.get("latestActualResult"):
+            print(f"  UAT {key}: verified PASS ({actual})")
+            continue
         status, _ = reviewer.request(
             "POST", f"/api/v1/rehearsals/{run_id}/uat-executions",
-            body={"caseKey": key, "result": "PASS" if ok else "FAIL", "actualResult": actual[:900]})
+            body={"caseKey": key, "result": "PASS", "actualResult": actual[:900]})
         expect(status, 201, f"record UAT execution {key}", _)
-        print(f"  UAT {key}: {'PASS' if ok else 'FAIL'} - {actual}")
-        if not ok:
-            fail(f"UAT check {key} FAILED (recorded as FAIL): {actual}")
+        print(f"  UAT {key}: recorded PASS - {actual}")
 
 
 # ----------------------------------------------------------------------
@@ -775,12 +810,15 @@ def main():
 
         run_stages(admin, engineer, reviewer, auditor, state, expected)
     except Exception as exc:
-        # Fail closed (MF-012): record FAILED with the original reason in registry if possible
+        # Fail closed (MF-012 / MF-A50): record FAILED with sanitized reason in registry if possible
+        import re
+        safe_msg = re.sub(r'(?i)(password|token|secret)[=:]\s*[^\s,;]+', r'\1=***', str(exc))
+        safe_msg = re.sub(r'https?://[^/\s]+', 'http://backend', safe_msg)
         try:
-            register(admin, state, "FAILED", state.get("step", "init"), failure=str(exc))
+            register(admin, state, "FAILED", state.get("step", "init"), failure=safe_msg[:300])
         except Exception as reg_exc:
             print(f"  warning: could not record FAILED in the registry: {reg_exc}", file=sys.stderr)
-        print(f"BOOTSTRAP FAILED: {exc}", file=sys.stderr)
+        print(f"BOOTSTRAP FAILED: {safe_msg}", file=sys.stderr)
         sys.exit(1)
 
 

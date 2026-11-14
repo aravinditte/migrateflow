@@ -1,4 +1,4 @@
-# Public deployment override (MF-005, MF-006)
+# Public deployment override (MF-005, MF-006, MF-A03)
 # Applies public nginx configuration that restricts /api to GET /api/v1/showcase/**,
 # turns off demo seeding, and disables showcase bootstrap endpoint.
 
@@ -7,10 +7,10 @@ services:
     environment:
       MIGRATEFLOW_DEMO_SEED_ENABLED: "false"
       MIGRATEFLOW_SHOWCASE_BOOTSTRAP_ENABLED: "false"
-    ports: [] # Do not expose backend port directly to host network
+    ports: !reset []
 
   frontend:
     volumes:
       - ./infra/nginx/nginx-public.conf:/etc/nginx/conf.d/default.conf:ro
-    ports:
+    ports: !override
       - "80:80"

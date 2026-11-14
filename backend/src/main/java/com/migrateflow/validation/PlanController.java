@@ -132,11 +132,6 @@ public class PlanController {
         AppUser actor = SecurityConfig.requireUser(users, auth);
         access.requireMembership(actor, access.projectOfSnapshot(snapshotId));
         StringBuilder sql = new StringBuilder(
-                "SELECT i.*, r.data_row_number FROM control.validation_issues i "
-                        + "LEFT JOIN stage.customer_input_rows r ON r.id = i.source_row_id AND i.kind = 'CUSTOMERS' "
-                        + "WHERE i.snapshot_id = ?");
-        // order rows join handled by union of both staging tables for the row number
-        sql = new StringBuilder(
                 "SELECT i.id, i.kind, i.source_row_id, i.code, i.severity, i.field, i.message, "
                         + "COALESCE(cr.data_row_number, orr.data_row_number) AS data_row_number "
                         + "FROM control.validation_issues i "
@@ -208,9 +203,9 @@ public class PlanController {
         Boolean isValid = jdbc.query("SELECT is_valid FROM " + validatedTable + " WHERE snapshot_id = ? AND input_row_id = ?",
                 (rs, n) -> rs.getBoolean("is_valid"), snapshotId, body.sourceRowId()).stream().findFirst()
                 .orElseThrow(() -> ApiException.notFound("Validated row"));
-        if (Boolean.TRUE.equals(isValid) && "EXCLUDE".equals(body.decision())) {
+        if (Boolean.TRUE.equals(isValid)) {
             throw ApiException.unprocessable("ROW_NOT_INVALID",
-                    "A valid row cannot be excluded; exclusions only approve omitting invalid rows");
+                    "A valid row cannot be excluded or kept under review; review decisions only apply to invalid rows");
         }
         UUID id = UUID.randomUUID();
         jdbc.update("INSERT INTO control.exclusion_decisions (id, snapshot_id, kind, source_row_id, decision, reason, reviewer_id) "
@@ -229,7 +224,7 @@ public class PlanController {
         AppUser actor = SecurityConfig.requireUser(users, auth);
         access.requireMembership(actor, access.projectOfSnapshot(snapshotId));
         List<Map<String, Object>> rows = jdbc.query(
-                "SELECT * FROM control.exclusion_decisions WHERE snapshot_id = ? ORDER BY decided_at",
+                "SELECT * FROM control.exclusion_decisions WHERE snapshot_id = ? ORDER BY decided_at ASC, id ASC",
                 (rs, n) -> Map.<String, Object>of(
                         "decisionId", rs.getObject("id", UUID.class).toString(),
                         "kind", rs.getString("kind"),

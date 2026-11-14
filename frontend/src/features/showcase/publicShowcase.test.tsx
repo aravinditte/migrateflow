@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { renderToString } from 'react-dom/server';
 import { ShowcaseView } from './PublicShowcase';
+import { MappingView } from './ShowcaseArchitecture';
 import type { ShowcaseOverview } from '../../lib/showcase';
 
 const BASE_OVERVIEW: ShowcaseOverview = {
@@ -106,5 +107,47 @@ describe('PublicShowcase UI states', () => {
     expect(html).toContain('1990');
     expect(html).toContain('Hinata Trading');
     expect(html).not.toContain('Lineage Integrity Alert');
+  });
+
+  it('renders loaded mapping definition correctly with Java DTO field names (MF-A13, MF-A52)', () => {
+    const mappingData = {
+      revisionNo: 1,
+      definitionHash: 'abcdef0123456789',
+      ruleHash: '9876543210fedcba',
+      definition: JSON.stringify({
+        customers: [
+          {
+            sourceColumn: 'Cust_No',
+            targetField: 'external_id',
+            steps: [{ operation: 'TRIM', args: {} }],
+            required: true,
+          },
+          {
+            sourceColumn: 'Full_Name',
+            targetField: 'full_name',
+            steps: [{ operation: 'NORMALIZE_NAME', args: {} }, { operation: 'UPPERCASE', args: {} }],
+            required: true,
+          },
+        ],
+        orders: [
+          {
+            sourceColumn: 'Order_No',
+            targetField: 'external_id',
+            steps: [{ operation: 'TRIM', args: {} }],
+            required: true,
+          },
+        ],
+      }),
+    };
+
+    const html = renderToString(<MappingView data={mappingData} />);
+    expect(html).toContain('Cust_No');
+    expect(html).toContain('external_id');
+    expect(html).toContain('Full_Name');
+    expect(html).toContain('full_name');
+    expect(html).toContain('NORMALIZE_NAME → UPPERCASE');
+    expect(html).toContain('Order_No');
+    expect(html).toContain('Mapping revision #');
+    expect(html).toContain('definition hash');
   });
 });

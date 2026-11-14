@@ -3,28 +3,29 @@
 ## Source files (exact headers, exact order)
 
 `customers.csv`:
-`Customer_No,Customer_Name,Email,Joined_Date`
+`Cust_No,Customer_Name,Email,Join_Date`
 
 `orders.csv`:
-`Order_No,Customer_No,Order_Date,Status,Amount_JPY`
+`Order_No,Cust_No,Order_Dt,Amount_JPY,State`
 
 Upload rules: UTF-8 (BOM allowed), RFC 4180 quoting, LF or CRLF, one header
 row, configured size/row limits. Duplicate or blank headers, NUL bytes,
 malformed quotes and inconsistent field counts fail the whole upload with
-`CSV_MALFORMED` — a bad file is never partially accepted.
+`CSV_MALFORMED` — a bad file is never partially accepted. Note: all source business
+records are synthetic.
 
 ## Field contracts
 
 | Dataset | Field | Target type | Rule |
 |---|---|---|---|
-| customers | Customer_No | text, ≤32 | required, unique business key after trim/uppercase |
+| customers | Cust_No | text, ≤32 | required, unique business key after trim/uppercase |
 | customers | Customer_Name | text, ≤200 | required after trim |
-| customers | Email | text, ≤254 | required, format checked |
-| customers | Joined_Date | date | strict `yyyy/MM/dd` |
+| customers | Email | text, ≤254 | optional; format checked if present |
+| customers | Join_Date | date | optional; strict `yyyy/MM/dd` |
 | orders | Order_No | text, ≤32 | required, unique business key after trim/uppercase |
-| orders | Customer_No | FK | must reference an accepted customer |
-| orders | Order_Date | date | strict `yyyy/MM/dd` |
-| orders | Status | enum | `N→NEW, P→PAID, S→SHIPPED, C→CANCELLED` |
+| orders | Cust_No | FK | required; must reference an accepted customer |
+| orders | Order_Dt | date | required; strict `yyyy/MM/dd` |
+| orders | State | enum | required; `N→NEW, P→PAID, S→SHIPPED, C→CANCELLED` |
 | orders | Amount_JPY | bigint | required, `>= 0` |
 
 ## Mapping DSL
