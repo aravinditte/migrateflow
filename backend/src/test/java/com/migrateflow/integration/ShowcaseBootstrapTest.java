@@ -39,7 +39,7 @@ class ShowcaseBootstrapTest extends AbstractIntegrationTest {
 
     private MvcResult register(String body, int expectedStatus) throws Exception {
         var request = post("/api/v1/internal/showcase/register")
-                .session(engineer()).with(csrf())
+                .session(admin()).with(csrf())
                 .header(TOKEN_HEADER, TOKEN)
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(body);

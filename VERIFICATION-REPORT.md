@@ -180,6 +180,91 @@ before: the sandbox JVM cannot reach Maven Central, so the Java suite
 executes in CI once `ci.yml` is added. The frontend items above ARE
 executed and verified locally.
 
+## Fix round 3 — showcase implementation review (S-01..S-24), 2026-11-14
+
+An external review of the merged showcase (main @36ec92c) was triaged
+claim by claim against the sources, including the CI logs it cited.
+Confirmed and fixed:
+
+- **S-01 (compile error, confirmed by CI run 43615176867):**
+  ShowcaseQueryService referenced a nonexistent `UatService.UatCase`;
+  the record is `CaseView`. This also explains the earlier undiagnosed
+  backend CI failure mode: compilation stops before any test runs.
+- **S-02..S-05 (bootstrap contracts):** the script's login (form
+  username/password), seed emails (@migrateflow.test), membership calls
+  (nonexistent /admin/users + POST memberships), bundle response shape,
+  mapping/validation/snapshot/issues paths and the freeze body all
+  disagreed with the real controllers. The script was rewritten against
+  the verified contracts: JSON email/password login, @example.test seed
+  identities, actor IDs from /auth/me + PUT /projects/{id}/members/{id},
+  POST /projects/{id}/mapping-revisions, POST/GET under
+  /validation-snapshots/{id}, freeze with the full four-ID body,
+  POST /manifests/{id}/rehearsals.
+- **S-06:** the Compose bootstrap could not write its state file (the
+  scripts mount is read-only). State now lives on a named volume via
+  MIGRATEFLOW_SHOWCASE_STATE_FILE.
+- **S-07/S-11:** reconciliation summaries use accepted/written, not
+  acceptedRows/writtenRows — fixed in the script, the verifier and the
+  frontend types, and pinned by a new frontend contract fixture test
+  carrying the real backend JSON shape.
+- **S-08:** Compose now binds backend/frontend to 127.0.0.1 with a
+  reverse-proxy note for public hosting; bootstrap actor passwords are
+  wired from the same variables the seed reads.
+- **S-09/S-10:** persisted approval decision is APPROVED (the request
+  verb is APPROVE) — fixed in the workflow stage and the verifier; the
+  all-stages-COMPLETED assertion in ShowcaseBootstrapTest covers it.
+- **S-12:** UAT checks deepened — COUNTS_MATCH and EXCLUSIONS_ABSENT now
+  compare FULL target key sets against the source-derived accepted sets;
+  PROVENANCE_TRACE verifies the stored source-file SHA-256 against the
+  checked-in fixture bytes in addition to row numbers and manifest
+  binding.
+- **S-13:** script failures now raise a BootstrapError that is recorded
+  as FAILED in the registry before exit (die()/SystemExit bypass fixed;
+  assert statements converted to the same path).
+- **S-14:** a READY re-run re-verifies the anonymous public overview
+  (state + integrity) before claiming success; it performs no writes.
+- **S-15:** public detail endpoints now require a READY scenario whose
+  lineage re-verifies at request time (503 otherwise); the overview keeps
+  showing truthful PREPARING/FAILED/NOT_READY states.
+- **S-16:** public records are restricted to the showcase cutover run
+  (origin_run_id) and the source payload is allowlisted to the known
+  synthetic fixture columns.
+- **S-17/S-23:** the overview now distinguishes historical reconciliation
+  (the stored PASS reports) from the bounded current-integrity check and
+  labels it with its check time; verification exposes three distinct
+  timestamps (cutover reconciliation completion, registry verification,
+  registry creation) and the hero shows the cutover one.
+- **S-18:** the bootstrap polls /actuator/health with a bounded timeout
+  and honest failure output before signing in.
+- **S-19:** `.github/workflows/showcase.yml` added — it runs the REAL
+  Python bootstrap against a live backend + PostgreSQL 16, the anonymous
+  verifier, an idempotency re-run and a restart-persistence check. Like
+  ci.yml originally, it must be added via the GitHub web UI: the API
+  token lacks the Workflows permission, so it is not part of the API
+  push (it is in the source tree and the zip).
+- **S-20:** SecurityConfig.requireUser now rejects disabled accounts, so
+  disabling cuts off live sessions, with a regression test. (Triage
+  note: the missing check predates the showcase — the showcase diff to
+  SecurityConfig only added the GET permitAll matcher — but the fix is
+  correct regardless.)
+- **S-21:** pagination offsets now go through a new
+  common.PageRequestUtil (the codebase had none; the spec and the
+  review both assumed one) with clamped page/size and long arithmetic.
+- **S-22:** the bootstrap treats the DB registry as canonical: a state
+  cache naming a different registry row is discarded, and cached
+  artifact IDs are validated against the live database before use.
+- **S-24:** the register endpoint now requires the ADMIN principal in
+  addition to session + token + flag; the script registers as admin.
+
+Verification status: frontend re-verified locally (strict tsc + Vite
+build; Vitest now 4/4 including the new contract fixture). The rewritten
+bootstrap script is py_compile-checked and every route/body/response key
+was re-derived from the controller sources cited above; it has still not
+executed against a live backend in the authoring sandbox. The Java fixes
+are source-reviewed; CI (./mvnw verify on the PR) is the first real
+execution, and showcase.yml becomes the first real bootstrap execution
+once added.
+
 ## Showcase — Automated Showcase spec implementation, 2026-11-14
 
 Implemented the Automated Showcase (SPEC section 20): V012 scenario

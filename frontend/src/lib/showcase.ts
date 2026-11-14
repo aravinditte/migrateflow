@@ -10,6 +10,7 @@ export interface ShowcaseOverview {
   setupStep: string | null;
   integrity: string;
   integrityProblems: string[];
+  integrityCheckedAt: string;
   failureMessage: string | null;
   backend: { connected: boolean };
   project: { name: string; organization: string; createdAt: string } | null;
@@ -23,6 +24,8 @@ export interface ShowcaseOverview {
   money: { currency: string; acceptedTotalYen: number; writtenTotalYen: number } | null;
   verification: {
     verifiedAt: string | null;
+    cutoverReconciliationCompletedAt: string | null;
+    showcaseRegisteredAt: string | null;
     manifestFingerprint: string | null;
     manifestHash: string | null;
     reportEvidenceHash: string | null;
@@ -47,9 +50,12 @@ export interface ShowcaseRecord {
 
 export interface ReconciliationView {
   scope: string; runId: string; status: string; evidenceHash: string; completedAt: string;
+  // Field names mirror ReconciliationService's persisted summary JSON
+  // exactly (accepted/written, not acceptedRows/writtenRows) — guarded by
+  // showcase.contract.test.ts against the real backend shape.
   summary: {
-    customers: { acceptedRows: number; writtenRows: number };
-    orders: { acceptedRows: number; writtenRows: number; acceptedAmountYen: number; writtenAmountYen: number };
+    customers: { raw: number; accepted: number; excluded: number; written: number };
+    orders: { raw: number; accepted: number; excluded: number; written: number; acceptedAmountYen: number; writtenAmountYen: number };
     differences: string[];
   };
 }

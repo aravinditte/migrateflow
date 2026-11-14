@@ -60,7 +60,14 @@ public class ShowcaseBootstrapController {
         if (!enabled) {
             throw new ApiException(HttpStatus.NOT_FOUND, "NOT_FOUND", "Showcase bootstrap is not enabled");
         }
-        SecurityConfig.requireUser(users, auth);
+        // The bootstrap principal is the ADMIN service identity (review
+        // S-24): an arbitrary authenticated account plus the token is not
+        // enough to register scenario pointers.
+        com.migrateflow.identity.AppUser actor = SecurityConfig.requireUser(users, auth);
+        if (!"ADMIN".equals(actor.role())) {
+            throw new ApiException(HttpStatus.FORBIDDEN, "BOOTSTRAP_ADMIN_REQUIRED",
+                    "Showcase registration requires the ADMIN bootstrap principal");
+        }
         if (token == null || token.isBlank() || !token.equals(providedToken)) {
             throw new ApiException(HttpStatus.FORBIDDEN, "BOOTSTRAP_TOKEN_INVALID",
                     "A valid showcase bootstrap token is required");

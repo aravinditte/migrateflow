@@ -34,8 +34,12 @@ services:
     depends_on:
       db:
         condition: service_healthy
+    # Bound to localhost on purpose (review S-08): for public hosting put
+    # a TLS reverse proxy in front of the frontend and keep the backend
+    # port private; never expose the operator workbench's known demo
+    # credentials to the internet.
     ports:
-      - "8081:8081"
+      - "127.0.0.1:8081:8081"
 
   frontend:
     build:
@@ -44,7 +48,7 @@ services:
     depends_on:
       - backend
     ports:
-      - "8080:80"
+      - "127.0.0.1:8080:80"
 
   # One-time public showcase bootstrap (opt-in profile, spec section 4).
   # Drives the REAL workflow over HTTP with the seeded demo actors and
@@ -62,12 +66,24 @@ services:
       MIGRATEFLOW_BASE_URL: http://backend:8081
       MIGRATEFLOW_SHOWCASE_BOOTSTRAP_TOKEN: ${MIGRATEFLOW_SHOWCASE_BOOTSTRAP_TOKEN:-}
       MIGRATEFLOW_FIXTURES_DIR: /app/fixtures
+      # Writable progress cache on a named volume: ./scripts is mounted
+      # read-only, so the state file must live elsewhere (review S-06).
+      # The DB registry remains the canonical progress record.
+      MIGRATEFLOW_SHOWCASE_STATE_FILE: /app/state/.showcase-bootstrap-state.json
+      # Actor credentials follow the same variables the backend seed
+      # reads, so a changed demo password reaches both sides (S-03).
+      MIGRATEFLOW_ADMIN_PASSWORD: ${MIGRATEFLOW_ADMIN_PASSWORD:-admin-dev-pw}
+      MIGRATEFLOW_ENGINEER_PASSWORD: ${MIGRATEFLOW_ENGINEER_PASSWORD:-engineer-dev-pw}
+      MIGRATEFLOW_REVIEWER_PASSWORD: ${MIGRATEFLOW_REVIEWER_PASSWORD:-reviewer-dev-pw}
+      MIGRATEFLOW_AUDITOR_PASSWORD: ${MIGRATEFLOW_AUDITOR_PASSWORD:-auditor-dev-pw}
     volumes:
       - ./scripts:/app/scripts:ro
       - ./fixtures:/app/fixtures:ro
+      - showcase-state:/app/state
     working_dir: /app
     command: ["python3", "scripts/bootstrap-showcase.py"]
 
 volumes:
   pgdata:
   uploads:
+  showcase-state:

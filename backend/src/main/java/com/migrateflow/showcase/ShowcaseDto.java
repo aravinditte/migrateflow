@@ -21,6 +21,7 @@ public final class ShowcaseDto {
             String setupStep,
             String integrity,
             List<String> integrityProblems,
+            String integrityCheckedAt,
             String failureMessage,
             BackendRef backend,
             ProjectRef project,
@@ -43,7 +44,14 @@ public final class ShowcaseDto {
 
     public record Money(String currency, long acceptedTotalYen, long writtenTotalYen) {}
 
-    public record Verification(String verifiedAt, String manifestFingerprint,
+    /**
+     * Distinct timestamps (review S-23): verifiedAt is when the registry
+     * accepted the READY registration; cutoverReconciliationCompletedAt is
+     * when the actual final reconciliation report completed;
+     * showcaseRegisteredAt is the registry row creation time.
+     */
+    public record Verification(String verifiedAt, String cutoverReconciliationCompletedAt,
+                               String showcaseRegisteredAt, String manifestFingerprint,
                                String manifestHash, String reportEvidenceHash) {}
 
     public record Stage(String key, String title, String status, String occurredAt,

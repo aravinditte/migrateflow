@@ -1,5 +1,5 @@
 import { ShowcaseOverview } from '../../lib/showcase';
-import { formatYen } from '../../lib/format';
+import { formatInstant, formatYen } from '../../lib/format';
 
 function Stat({ label, value, hint }: { label: string; value: string; hint: string }) {
   return (
@@ -32,7 +32,10 @@ export default function ShowcaseMetrics({ overview }: { overview: ShowcaseOvervi
       </div>
       <p className="muted">
         Every figure above is read live from persisted PostgreSQL artifacts (validation snapshot, run records,
-        reconciliation reports). Integrity status: <strong>{overview.integrity}</strong>
+        reconciliation reports). The PASS badges are the <strong>historical</strong> reconciliation reports from
+        the original runs; separately, a bounded current-integrity check (lineage, counts, totals, ledger —
+        not a per-row rehash) reports <strong>{overview.integrity}</strong> as of{' '}
+        {formatInstant(overview.integrityCheckedAt)}.
         {overview.verification?.manifestFingerprint && (
           <> · Manifest fingerprint <span className="mono">{overview.verification.manifestFingerprint}…</span></>
         )}
