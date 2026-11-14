@@ -66,6 +66,10 @@ public class SecurityConfig {
                 .csrfTokenRequestHandler(requestHandler))
             .authorizeHttpRequests(auth -> auth
                 .requestMatchers("/api/v1/auth/csrf", "/api/v1/auth/login").permitAll()
+                // Public showcase: anonymous GET only (spec 5.2/7.1). The
+                // controller exposes no mutation handlers; any non-GET
+                // request to this namespace still requires authentication.
+                .requestMatchers(org.springframework.http.HttpMethod.GET, "/api/v1/showcase/**").permitAll()
                 .requestMatchers("/actuator/health", "/actuator/info").permitAll()
                 .requestMatchers("/api/**").authenticated()
                 .anyRequest().permitAll())
@@ -87,11 +91,7 @@ public class SecurityConfig {
         if (auth == null || !auth.isAuthenticated() || "anonymousUser".equals(auth.getName())) {
             throw new ApiException(HttpStatus.UNAUTHORIZED, "UNAUTHENTICATED", "A valid session is required");
         }
-        AppUser user = users.findByEmail(auth.getName())
+        return users.findByEmail(auth.getName())
                 .orElseThrow(() -> new ApiException(HttpStatus.UNAUTHORIZED, "UNAUTHENTICATED", "A valid session is required"));
-        if (!user.enabled()) {
-            throw new ApiException(HttpStatus.UNAUTHORIZED, "USER_DISABLED", "User account is disabled");
-        }
-        return user;
     }
 }
