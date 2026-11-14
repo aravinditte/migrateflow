@@ -4,43 +4,52 @@ MigrateFlow showcase bootstrap (Automated Showcase spec, section 4).
 
 One-time, idempotent, resumable orchestration that produces the public
 showcase scenario by driving the REAL authenticated MigrateFlow workflow
-over HTTP - project, upload, mapping, validation, reviewer exclusions,
-manifest freeze, Spring Batch rehearsal, scripted-but-real UAT checks,
-reviewer approval, engineer cutover - and finally registering the
-resulting artifact IDs in the showcase registry via the token-guarded
-internal endpoint. The registry is a pointer only; the backend
-re-verifies lineage before it will accept (or display) READY.
+over HTTP - project, memberships, upload, mapping, validation, reviewer
+exclusions, manifest freeze, Spring Batch rehearsal, scripted-but-real
+UAT checks, reviewer approval, engineer cutover - and finally registering
+the resulting artifact IDs in the showcase registry through the
+token-guarded internal endpoint (ADMIN principal). The registry is a
+pointer only; the backend re-verifies lineage before it will accept (or
+display) READY.
 
 It never inserts into target/rehearsal/approval/report tables, never
-resets anything, and fails closed: any failed gate records FAILED in the
-registry and exits non-zero.
+resets anything, and fails closed: any failure is recorded as FAILED in
+the registry (best effort) and exits non-zero with the original reason.
 
 Prerequisites (operator/deployment side, spec 4.2):
   * Backend running with MIGRATEFLOW_SHOWCASE_BOOTSTRAP_ENABLED=true and
     MIGRATEFLOW_SHOWCASE_BOOTSTRAP_TOKEN set to the same token given here.
   * Demo/operator accounts exist (the seeded demo users for local demos,
     or provisioned equivalents). Credentials come from the environment;
-    the defaults below are the LOCAL DEMO seed defaults only - never use
-    them on a public deployment.
+    the defaults below match DemoSeedRunner's LOCAL DEMO defaults only -
+    never use them on a public deployment.
 
 Environment:
   MIGRATEFLOW_BASE_URL                 default http://localhost:8081
   MIGRATEFLOW_SHOWCASE_SLUG            default hinata-trading
   MIGRATEFLOW_SHOWCASE_BOOTSTRAP_TOKEN required
-  MIGRATEFLOW_ADMIN_EMAIL / _PASSWORD
-  MIGRATEFLOW_ENGINEER_EMAIL / _PASSWORD
-  MIGRATEFLOW_REVIEWER_EMAIL / _PASSWORD
+  MIGRATEFLOW_SHOWCASE_STATE_FILE      default scripts/.showcase-bootstrap-state.json
+  MIGRATEFLOW_ADMIN_EMAIL              default admin@example.test
+  MIGRATEFLOW_ENGINEER_EMAIL           default engineer@example.test
+  MIGRATEFLOW_REVIEWER_EMAIL           default reviewer@example.test
+  MIGRATEFLOW_AUDITOR_EMAIL            default auditor@example.test
+  MIGRATEFLOW_ADMIN_PASSWORD / MIGRATEFLOW_ENGINEER_PASSWORD /
+  MIGRATEFLOW_REVIEWER_PASSWORD / MIGRATEFLOW_AUDITOR_PASSWORD
+      (same variable names DemoSeedRunner reads; demo defaults otherwise)
   MIGRATEFLOW_FIXTURES_DIR             default <repo>/fixtures
 
 Usage:  python3 scripts/bootstrap-showcase.py
-State is kept in scripts/.showcase-bootstrap-state.json so an interrupted
-run resumes from the last completed stage instead of starting over.
+The DB registry is the canonical progress record; the local state file
+is only a resume cache and is discarded when it disagrees with the
+registry or points at artifacts that no longer exist.
 """
 import csv
+import hashlib
 import json
 import os
 import sys
 import time
+import urllib.parse
 import urllib.request
 import urllib.error
 import http.cookiejar
@@ -51,25 +60,21 @@ FIXTURES = Path(os.environ.get("MIGRATEFLOW_FIXTURES_DIR", REPO / "fixtures"))
 BASE = os.environ.get("MIGRATEFLOW_BASE_URL", "http://localhost:8081").rstrip("/")
 SLUG = os.environ.get("MIGRATEFLOW_SHOWCASE_SLUG", "hinata-trading")
 TOKEN = os.environ.get("MIGRATEFLOW_SHOWCASE_BOOTSTRAP_TOKEN", "")
-STATE_FILE = Path(__file__).resolve().parent / ".showcase-bootstrap-state.json"
-BOOTSTRAP_VERSION = "bootstrap-showcase.py/1.0"
+STATE_FILE = Path(os.environ.get(
+    "MIGRATEFLOW_SHOWCASE_STATE_FILE",
+    Path(__file__).resolve().parent / ".showcase-bootstrap-state.json"))
+BOOTSTRAP_VERSION = "bootstrap-showcase.py/2.0"
 PROJECT_NAME = "Hinata Trading Co. — Legacy Sales Migration"
-
-CREDS = {
-    "admin": (os.environ.get("MIGRATEFLOW_ADMIN_EMAIL", "admin@migrateflow.test"),
-              os.environ.get("MIGRATEFLOW_ADMIN_PASSWORD", "admin-dev-pw")),
-    "engineer": (os.environ.get("MIGRATEFLOW_ENGINEER_EMAIL", "engineer@migrateflow.test"),
-                 os.environ.get("MIGRATEFLOW_ENGINEER_PASSWORD", "engineer-dev-pw")),
-    "reviewer": (os.environ.get("MIGRATEFLOW_REVIEWER_EMAIL", "reviewer@migrateflow.test"),
-                 os.environ.get("MIGRATEFLOW_REVIEWER_PASSWORD", "reviewer-dev-pw")),
-    "auditor": (os.environ.get("MIGRATEFLOW_AUDITOR_EMAIL", "auditor@migrateflow.test"),
-                os.environ.get("MIGRATEFLOW_AUDITOR_PASSWORD", "auditor-dev-pw")),
-}
+ARTIFACT_KEYS = ("projectId", "bundleId", "mappingRevisionId", "ruleSetRevisionId",
+                 "snapshotId", "manifestId", "rehearsalRunId", "approvalId", "cutoverRunId")
 
 
-def die(msg):
-    print(f"BOOTSTRAP FAILED: {msg}", file=sys.stderr)
-    sys.exit(1)
+class BootstrapError(Exception):
+    """A stage failure: recorded as FAILED in the registry, then exit 1."""
+
+
+def fail(msg):
+    raise BootstrapError(msg)
 
 
 class Client:
@@ -112,37 +117,75 @@ class Client:
             except Exception:
                 payload = text
             return e.code, payload
+        except urllib.error.URLError as e:
+            return 0, str(e)
 
     def login(self, email, password):
         self.request("GET", "/api/v1/auth/csrf")
         status, payload = self.request("POST", "/api/v1/auth/login",
-                                       form={"username": email, "password": password})
+                                       body={"email": email, "password": password})
         if status != 200:
-            die(f"login failed for {self.name} ({email}): HTTP {status} {payload}")
+            fail(f"login failed for {self.name} ({email}): HTTP {status} {payload}")
         self.request("GET", "/api/v1/auth/csrf")
         print(f"  signed in as {self.name} ({email})")
 
+    def me(self):
+        status, payload = self.request("GET", "/api/v1/auth/me")
+        expect(status, 200, f"{self.name} /auth/me", payload)
+        return payload
 
-import urllib.parse  # noqa: E402  (used by Client.request form encoding)
+
+def creds(role):
+    email = os.environ.get(f"MIGRATEFLOW_{role}_EMAIL", f"{role.lower()}@example.test")
+    password = os.environ.get(f"MIGRATEFLOW_{role}_PASSWORD", f"{role.lower()}-dev-pw")
+    return email, password
 
 
 def expect(status, wanted, what, payload):
     if status != wanted:
-        die(f"{what}: expected HTTP {wanted}, got {status}: {payload}")
+        fail(f"{what}: expected HTTP {wanted}, got {status}: {payload}")
     return payload
 
 
-def load_state():
-    if STATE_FILE.exists():
-        return json.loads(STATE_FILE.read_text())
+def wait_for_backend(timeout=180):
+    """Bounded readiness polling (review S-18): honest failure details."""
+    deadline = time.time() + timeout
+    last = None
+    while time.time() < deadline:
+        try:
+            with urllib.request.urlopen(BASE + "/actuator/health", timeout=5) as resp:
+                if resp.status == 200:
+                    print(f"  backend healthy at {BASE}")
+                    return
+                last = f"HTTP {resp.status}"
+        except Exception as exc:
+            last = str(exc)
+        time.sleep(3)
+    fail(f"backend at {BASE} did not become healthy within {timeout}s (last: {last})")
+
+
+# ----------------------------------------------------------------------
+# Registry (canonical progress) + local resume cache
+# ----------------------------------------------------------------------
+
+def load_state_file():
+    try:
+        if STATE_FILE.exists():
+            return json.loads(STATE_FILE.read_text())
+    except Exception:
+        return {}
     return {}
 
 
 def save_state(state):
-    STATE_FILE.write_text(json.dumps(state, indent=2))
+    try:
+        STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+        STATE_FILE.write_text(json.dumps(state, indent=2))
+    except Exception as exc:
+        print(f"  warning: could not persist local state cache: {exc}")
 
 
-def register(engineer: Client, state, setup_state, step, failure=None):
+def register(admin: Client, state, setup_state, step, failure=None):
     body = {
         "slug": SLUG,
         "projectId": state.get("projectId"), "bundleId": state.get("bundleId"),
@@ -154,16 +197,70 @@ def register(engineer: Client, state, setup_state, step, failure=None):
         "setupState": setup_state, "setupStep": step,
         "bootstrapVersion": BOOTSTRAP_VERSION, "failureMessage": failure,
     }
-    status, payload = engineer.request("POST", "/api/v1/internal/showcase/register", body=body,
-                                       headers={"X-Showcase-Bootstrap-Token": TOKEN})
+    state["step"] = step
+    status, payload = admin.request("POST", "/api/v1/internal/showcase/register", body=body,
+                                    headers={"X-Showcase-Bootstrap-Token": TOKEN})
     if status == 404:
-        die("showcase bootstrap is not enabled on the backend "
-            "(set MIGRATEFLOW_SHOWCASE_BOOTSTRAP_ENABLED=true and restart it)")
+        fail("showcase bootstrap is not enabled on the backend "
+             "(set MIGRATEFLOW_SHOWCASE_BOOTSTRAP_ENABLED=true and restart it)")
     if status == 422:
-        die(f"backend refused READY - lineage problems: {payload}")
+        fail(f"backend refused READY - lineage problems: {payload}")
     expect(status, 200, "register showcase scenario", payload)
+    if isinstance(payload, dict) and payload.get("id"):
+        state["registryId"] = payload["id"]
+        save_state(state)
     return payload
 
+
+def adopt_state(admin: Client, engineer: Client):
+    """Registry first (S-22): the local cache is trusted only when it
+    agrees with the registry or its artifacts still exist."""
+    state = load_state_file()
+    status, existing = admin.request(
+        "GET", f"/api/v1/internal/showcase/scenario?slug={SLUG}",
+        headers={"X-Showcase-Bootstrap-Token": TOKEN})
+    if status == 200:
+        if state.get("registryId") and state["registryId"] != existing.get("id"):
+            print("  local state cache belongs to a different database; discarding it")
+            state = {}
+        for key in ARTIFACT_KEYS:
+            if existing.get(key):
+                state[key] = existing[key]
+        state["registryId"] = existing.get("id")
+        save_state(state)
+        return state, existing
+    if status not in (404,):
+        fail(f"registry lookup failed: HTTP {status} {existing}")
+    # No registry row: validate any cached artifact IDs before trusting them.
+    if state.get("snapshotId"):
+        s2, _ = engineer.request("GET", f"/api/v1/validation-snapshots/{state['snapshotId']}")
+        if s2 != 200:
+            print("  cached snapshot no longer exists; discarding local state cache")
+            state = {}
+    elif state.get("projectId"):
+        s2, page = engineer.request("GET", "/api/v1/projects?size=100")
+        ids = [p["id"] for p in page.get("content", [])] if s2 == 200 else []
+        if state["projectId"] not in ids:
+            print("  cached project no longer exists; discarding local state cache")
+            state = {}
+    return state, None
+
+
+def verify_ready_publicly():
+    """Anonymous re-verification for idempotent READY re-runs (S-14)."""
+    anon = Client("anonymous")
+    status, overview = anon.request("GET", "/api/v1/showcase/overview")
+    expect(status, 200, "public overview check", overview)
+    if overview.get("setupState") != "READY" or overview.get("integrity") != "OK":
+        fail(f"registry claims READY but the public integrity check reports "
+             f"state={overview.get('setupState')} integrity={overview.get('integrity')} "
+             f"problems={overview.get('integrityProblems')}")
+    print("  public overview re-verified: READY with integrity OK; no writes performed")
+
+
+# ----------------------------------------------------------------------
+# Workflow stages (all real HTTP operations)
+# ----------------------------------------------------------------------
 
 def wait_run(client: Client, run_id, label, timeout=900):
     deadline = time.time() + timeout
@@ -175,7 +272,7 @@ def wait_run(client: Client, run_id, label, timeout=900):
         if last in ("VERIFIED", "VERIFICATION_FAILED", "FAILED_TERMINAL"):
             return run
         time.sleep(3)
-    die(f"{label} run {run_id} did not finish within {timeout}s (last status {last})")
+    fail(f"{label} run {run_id} did not finish within {timeout}s (last status {last})")
 
 
 def read_csv(path):
@@ -200,66 +297,26 @@ def multipart_upload(client: Client, path, files, fields):
                           ctype=f"multipart/form-data; boundary={boundary}")
 
 
-def main():
-    if not TOKEN:
-        die("MIGRATEFLOW_SHOWCASE_BOOTSTRAP_TOKEN is not set")
-    expected = json.loads((FIXTURES / "expected_results.json").read_text())
-    state = load_state()
-
-    print(f"[1/6] Signing in demo actors against {BASE} ...")
-    admin = Client("admin"); admin.login(*CREDS["admin"])
-    engineer = Client("engineer"); engineer.login(*CREDS["engineer"])
-    reviewer = Client("reviewer"); reviewer.login(*CREDS["reviewer"])
-
-    # Idempotency: an already-READY registry scenario ends the run here.
-    status, existing = engineer.request(
-        "GET", f"/api/v1/internal/showcase/scenario?slug={SLUG}",
-        headers={"X-Showcase-Bootstrap-Token": TOKEN})
-    if status == 200 and existing.get("setupState") == "READY":
-        print(f"Showcase '{SLUG}' is already bootstrapped and READY "
-              f"(project {existing.get('projectId')}, cutover {existing.get('cutoverRunId')}). Nothing to do.")
-        return
-    if status == 200:
-        for key in ("projectId", "bundleId", "mappingRevisionId", "ruleSetRevisionId", "snapshotId",
-                    "manifestId", "rehearsalRunId", "approvalId", "cutoverRunId"):
-            if existing.get(key):
-                state[key] = existing[key]
-        save_state(state)
-        print(f"  resuming from registry state {existing.get('setupState')} at step {existing.get('setupStep')}")
-
-    try:
-        run_stages(admin, engineer, reviewer, state, expected)
-    except SystemExit:
-        raise
-    except Exception as exc:  # fail closed in the registry as well
-        try:
-            register(engineer, state, "FAILED", state.get("step"), failure=str(exc))
-        except SystemExit:
-            pass
-        raise
-
-
-def run_stages(admin, engineer, reviewer, state, expected):
+def run_stages(admin, engineer, reviewer, auditor, state, expected):
     pid = state.get("projectId")
 
     print("[2/6] Project, intake, mapping, validation ...")
     if not pid:
-        status, users = admin.request("GET", "/api/v1/admin/users")
-        expect(status, 200, "list users", users)
-        by_email = {u["email"]: u["id"] for u in users}
         status, project = engineer.request("POST", "/api/v1/projects", body={
             "name": PROJECT_NAME,
             "description": "Automated public showcase scenario: synthetic Hinata Trading Co. legacy sales data, "
                            "executed end-to-end by the real MigrateFlow workflow with automated demo actors."})
         expect(status, 201, "create project", project)
         pid = state["projectId"] = project["id"]
-        for email_key, role in (("reviewer", "REVIEWER"), ("auditor", "AUDITOR")):
-            email, _ = CREDS[email_key]
-            s2, p2 = admin.request("POST", f"/api/v1/projects/{pid}/memberships",
-                                   body={"userId": by_email[email], "role": role})
-            expect(s2, 201, f"add {role} membership", p2)
+        # Memberships: actor IDs from their own /auth/me, granted by ADMIN
+        # through the existing PUT members endpoint (review S-04).
+        for actor, role in ((reviewer, "REVIEWER"), (auditor, "AUDITOR")):
+            user_id = actor.me()["id"]
+            s2, p2 = admin.request("PUT", f"/api/v1/projects/{pid}/members/{user_id}",
+                                   body={"active": True})
+            expect(s2, 200, f"grant {role} membership", p2)
         save_state(state)
-        register(engineer, state, "PREPARING", "project")
+        register(admin, state, "PREPARING", "project")
 
     if not state.get("bundleId"):
         status, bundle = multipart_upload(
@@ -268,49 +325,55 @@ def run_stages(admin, engineer, reviewer, state, expected):
             fields={"exportedAt": "2025-03-31T00:00:00Z"})
         expect(status, 201, "upload bundle", bundle)
         state["bundleId"] = bundle["bundleId"]
-        row_counts = {f["kind"]: f["rowCount"] for f in bundle["files"]}
-        assert row_counts.get("CUSTOMERS") == expected["customers"]["rawRows"], row_counts
-        assert row_counts.get("ORDERS") == expected["orders"]["rawRows"], row_counts
+        state["customersFileId"] = bundle["customers"]["fileId"]
+        state["ordersFileId"] = bundle["orders"]["fileId"]
+        state["customersSha256"] = bundle["customers"]["sha256"]
+        state["ordersSha256"] = bundle["orders"]["sha256"]
+        row_counts = {"CUSTOMERS": bundle["customers"]["rowCount"], "ORDERS": bundle["orders"]["rowCount"]}
+        if row_counts["CUSTOMERS"] != expected["customers"]["rawRows"] or row_counts["ORDERS"] != expected["orders"]["rawRows"]:
+            fail(f"uploaded row counts disagree with fixtures: {row_counts}")
         save_state(state)
-        register(engineer, state, "PREPARING", "intake")
+        register(admin, state, "PREPARING", "intake")
         print(f"  bundle {state['bundleId']} uploaded: {row_counts}")
 
     if not state.get("mappingRevisionId"):
-        status, mapping = engineer.request("POST", f"/api/v1/projects/{pid}/mappings/publish", body={})
+        status, mapping = engineer.request("POST", f"/api/v1/projects/{pid}/mapping-revisions")
         expect(status, 201, "publish mapping", mapping)
         state["mappingRevisionId"] = mapping["revisionId"]
         state["ruleSetRevisionId"] = mapping["ruleSetRevisionId"]
         save_state(state)
-        register(engineer, state, "PREPARING", "mapping")
+        register(admin, state, "PREPARING", "mapping")
 
     if not state.get("snapshotId"):
-        status, started = engineer.request("POST", f"/api/v1/projects/{pid}/validations", body={
-            "bundleId": state["bundleId"], "mappingRevisionId": state["mappingRevisionId"]})
+        status, started = engineer.request("POST", f"/api/v1/projects/{pid}/validation-snapshots", body={
+            "bundleId": state["bundleId"], "mappingRevisionId": state["mappingRevisionId"],
+            "ruleSetRevisionId": state["ruleSetRevisionId"]})
         expect(status, 202, "start validation", started)
         state["snapshotId"] = started["snapshotId"]
         save_state(state)
     snapshot = None
     deadline = time.time() + 300
     while time.time() < deadline:
-        status, snapshot = engineer.request(
-            "GET", f"/api/v1/projects/{pid}/validation-snapshots/{state['snapshotId']}")
+        status, snapshot = engineer.request("GET", f"/api/v1/validation-snapshots/{state['snapshotId']}")
         expect(status, 200, "poll validation snapshot", snapshot)
         if snapshot["status"] in ("COMPLETED", "FAILED"):
             break
         time.sleep(2)
     if not snapshot or snapshot["status"] != "COMPLETED":
-        die(f"validation did not complete: {snapshot}")
-    counts = json.loads(snapshot["counts"])
-    assert counts["customers"]["valid"] == expected["customers"]["acceptedRows"], counts
-    assert counts["orders"]["valid"] == expected["orders"]["acceptedRows"], counts
-    register(engineer, state, "PREPARING", "validation")
+        fail(f"validation did not complete: {snapshot}")
+    counts = json.loads(snapshot["counts"]) if isinstance(snapshot["counts"], str) else snapshot["counts"]
+    if counts["customers"]["valid"] != expected["customers"]["acceptedRows"] or counts["orders"]["valid"] != expected["orders"]["acceptedRows"]:
+        fail(f"validation counts disagree with fixture expectations: {counts}")
+    state["counts"] = counts
+    save_state(state)
+    register(admin, state, "PREPARING", "validation")
     print(f"  validation COMPLETED: {counts}")
 
     print("[3/6] Reviewer exclusions for every invalid row ...")
     issues, page = [], 0
     while True:
         status, result = reviewer.request(
-            "GET", f"/api/v1/projects/{pid}/validation-snapshots/{state['snapshotId']}/issues?size=100&page={page}")
+            "GET", f"/api/v1/validation-snapshots/{state['snapshotId']}/issues?size=100&page={page}")
         expect(status, 200, "list validation issues", result)
         issues.extend(result["content"])
         if len(result["content"]) < 100:
@@ -331,42 +394,46 @@ def run_stages(admin, engineer, reviewer, state, expected):
         state["decidedRows"] = sorted(decided)
         save_state(state)
     total_invalid = expected["customers"]["excludedRows"] + expected["orders"]["excludedRows"]
-    assert len(invalid) == total_invalid, f"expected {total_invalid} invalid rows, saw {len(invalid)}"
+    if len(invalid) != total_invalid:
+        fail(f"expected {total_invalid} invalid rows, saw {len(invalid)}")
     state["invalidRows"] = [{"kind": k[0], "dataRowNumber": v["dataRowNumber"]} for k, v in invalid.items()]
     save_state(state)
-    register(engineer, state, "PREPARING", "exclusions")
+    register(admin, state, "PREPARING", "exclusions")
     print(f"  {len(invalid)} invalid rows excluded by REVIEWER (none valid touched)")
 
     print("[4/6] Freeze manifest and run the real rehearsal ...")
     if not state.get("manifestId"):
-        status, manifest = engineer.request("POST", f"/api/v1/projects/{pid}/manifests",
-                                            body={"snapshotId": state["snapshotId"]})
+        status, manifest = engineer.request("POST", f"/api/v1/projects/{pid}/manifests", body={
+            "bundleId": state["bundleId"], "mappingRevisionId": state["mappingRevisionId"],
+            "ruleSetRevisionId": state["ruleSetRevisionId"], "validationSnapshotId": state["snapshotId"]})
         expect(status, 201, "freeze manifest", manifest)
-        assert manifest["status"] == "FROZEN", manifest
+        if manifest["status"] != "FROZEN":
+            fail(f"manifest is not FROZEN: {manifest}")
         state["manifestId"] = manifest["manifestId"]
         state["manifestHash"] = manifest["manifestHash"]
         save_state(state)
-        register(engineer, state, "PREPARING", "freeze")
+        register(admin, state, "PREPARING", "freeze")
 
     if not state.get("rehearsalRunId"):
-        status, launched = engineer.request("POST", f"/api/v1/projects/{pid}/rehearsals",
-                                            body={"manifestId": state["manifestId"]})
+        status, launched = engineer.request("POST", f"/api/v1/manifests/{state['manifestId']}/rehearsals")
         expect(status, 202, "launch rehearsal", launched)
         state["rehearsalRunId"] = launched["runId"]
         save_state(state)
     run = wait_run(engineer, state["rehearsalRunId"], "rehearsal")
     if run["status"] != "VERIFIED":
-        die(f"rehearsal did not verify: {run}")
-    register(engineer, state, "PREPARING", "rehearsal")
+        fail(f"rehearsal did not verify: {run}")
+    register(admin, state, "PREPARING", "rehearsal")
     status, report = engineer.request("GET", f"/api/v1/runs/{state['rehearsalRunId']}/reconciliation")
     expect(status, 200, "rehearsal reconciliation", report)
-    assert report["status"] == "PASS", report
+    if report["status"] != "PASS":
+        fail(f"rehearsal reconciliation is not PASS: {report}")
     state["rehearsalReportId"] = report["reportId"]
+    save_state(state)
     print(f"  rehearsal VERIFIED, reconciliation PASS ({report['reportId']})")
 
     print("[5/6] Scripted UAT - real checks, recorded by REVIEWER ...")
-    run_uat_checks(engineer, reviewer, state, expected, json.loads(report["summary"]), counts)
-    register(engineer, state, "PREPARING", "uat")
+    run_uat_checks(engineer, reviewer, state, json.loads(report["summary"]))
+    register(admin, state, "PREPARING", "uat")
 
     if not state.get("approvalId"):
         status, uat_now = reviewer.request("GET", f"/api/v1/rehearsals/{state['rehearsalRunId']}/uat")
@@ -381,7 +448,7 @@ def run_stages(admin, engineer, reviewer, state, expected):
         expect(status, 201, "submit approval", approval)
         state["approvalId"] = approval["approvalId"]
         save_state(state)
-    register(engineer, state, "PREPARING", "approval")
+    register(admin, state, "PREPARING", "approval")
     print(f"  approval recorded: {state['approvalId']}")
 
     print("[6/6] Final cutover and showcase registration ...")
@@ -395,14 +462,17 @@ def run_stages(admin, engineer, reviewer, state, expected):
         save_state(state)
     run = wait_run(engineer, state["cutoverRunId"], "cutover")
     if run["status"] != "VERIFIED":
-        die(f"cutover did not verify: {run}")
+        fail(f"cutover did not verify: {run}")
     status, final_report = engineer.request("GET", f"/api/v1/runs/{state['cutoverRunId']}/reconciliation")
     expect(status, 200, "cutover reconciliation", final_report)
-    assert final_report["status"] == "PASS", final_report
+    if final_report["status"] != "PASS":
+        fail(f"cutover reconciliation is not PASS: {final_report}")
     summary = json.loads(final_report["summary"])
-    assert summary["orders"]["writtenAmountYen"] == expected["orders"]["acceptedAmountTotalYen"], summary
+    exp_total = json.loads((FIXTURES / "expected_results.json").read_text())["orders"]["acceptedAmountTotalYen"]
+    if summary["orders"]["writtenAmountYen"] != exp_total:
+        fail(f"cutover written total disagrees with fixtures: {summary}")
 
-    register(engineer, state, "READY", "publish")
+    register(admin, state, "READY", "publish")
     print(f"Showcase READY: project={pid} manifest={state['manifestId']} "
           f"rehearsal={state['rehearsalRunId']} cutover={state['cutoverRunId']}")
     print(f"Public overview: {BASE}/api/v1/showcase/overview")
@@ -413,15 +483,14 @@ def run_stages(admin, engineer, reviewer, state, expected):
 # against live artifacts; a failed check is recorded FAIL and aborts.
 # ----------------------------------------------------------------------
 
-def count_rehearsal_rows(client, run_id, kind):
-    total, page = 0, 0
+def rehearsal_rows(client, run_id, kind):
+    rows, page = [], 0
     while True:
-        status, result = client.request(
-            "GET", f"/api/v1/rehearsals/{run_id}/{kind}?size=100&page={page}")
-        expect(status, 200, f"count rehearsal {kind}", result)
-        total += len(result["content"])
+        status, result = client.request("GET", f"/api/v1/rehearsals/{run_id}/{kind}?size=100&page={page}")
+        expect(status, 200, f"list rehearsal {kind}", result)
+        rows.extend(result["content"])
         if len(result["content"]) < 100:
-            return total
+            return rows
         page += 1
 
 
@@ -431,25 +500,42 @@ def search_rehearsal(client, run_id, kind, q):
     return result["content"]
 
 
-def run_uat_checks(engineer, reviewer, state, expected, rehearsal_summary, counts):
-    pid, run_id = state["projectId"], state["rehearsalRunId"]
+def run_uat_checks(engineer, reviewer, state, rehearsal_summary):
+    run_id = state["rehearsalRunId"]
+    counts = state["counts"]
     status, uat = reviewer.request("GET", f"/api/v1/rehearsals/{run_id}/uat")
     expect(status, 200, "list UAT cases", uat)
     cases = {c["caseKey"]: c for c in uat["cases"]}
 
     _, cust_by_id, _ = read_csv(FIXTURES / "customers_1000.csv")
     _, order_by_id, _ = read_csv(FIXTURES / "orders_2000.csv")
+    invalid_numbers = {"CUSTOMERS": set(), "ORDERS": set()}
+    for item in state["invalidRows"]:
+        invalid_numbers[item["kind"]].add(item["dataRowNumber"])
+    expected_customers = {ext for ext, (n, _) in cust_by_id.items() if n not in invalid_numbers["CUSTOMERS"]}
+    expected_orders = {ext for ext, (n, _) in order_by_id.items() if n not in invalid_numbers["ORDERS"]}
+
+    cache = {}
+
+    def target_ids(kind):
+        if kind not in cache:
+            id_key = "externalCustomerId" if kind == "customers" else "externalOrderId"
+            cache[kind] = {r[id_key] for r in rehearsal_rows(engineer, run_id, kind)}
+        return cache[kind]
 
     def check_counts():
-        c = count_rehearsal_rows(engineer, run_id, "customers")
-        o = count_rehearsal_rows(engineer, run_id, "orders")
-        ok = (c == rehearsal_summary["customers"]["acceptedRows"] == counts["customers"]["valid"]
-              and o == rehearsal_summary["orders"]["acceptedRows"] == counts["orders"]["valid"])
-        return ok, (f"rehearsal target holds {c} customers and {o} orders; reconciliation report and "
-                    f"validation snapshot agree ({counts['customers']['valid']}/{counts['orders']['valid']} accepted)")
+        c_ids, o_ids = target_ids("customers"), target_ids("orders")
+        ok = (c_ids == expected_customers and o_ids == expected_orders
+              and rehearsal_summary["customers"]["accepted"] == counts["customers"]["valid"]
+              and rehearsal_summary["customers"]["written"] == counts["customers"]["valid"]
+              and rehearsal_summary["orders"]["accepted"] == counts["orders"]["valid"]
+              and rehearsal_summary["orders"]["written"] == counts["orders"]["valid"])
+        return ok, (f"rehearsal target key sets equal the accepted snapshot exactly "
+                    f"({len(c_ids)} customers, {len(o_ids)} orders; no missing, no extra); "
+                    f"reconciliation accepted/written and validation counts agree")
 
     def check_customers():
-        samples = search_rehearsal(engineer, run_id, "customers", "")[:3]
+        samples = rehearsal_rows(engineer, run_id, "customers")[:3]
         if len(samples) < 3:
             return False, "fewer than 3 rehearsal customers available to spot-check"
         for row in samples:
@@ -464,12 +550,10 @@ def run_uat_checks(engineer, reviewer, state, expected, rehearsal_summary, count
         return True, f"spot-checked {ids}: normalized name/email/joined date match the accepted source rows"
 
     def check_orders():
-        accepted_total = sum(int(r[3]) for _, r in order_by_id.values())
-        invalid_numbers = {i["dataRowNumber"] for i in state["invalidRows"] if i["kind"] == "ORDERS"}
-        expected_total = sum(int(r[3]) for n, r in order_by_id.values() if n not in invalid_numbers)
+        expected_total = sum(int(r[3]) for n, r in order_by_id.values() if n not in invalid_numbers["ORDERS"])
         ok = (rehearsal_summary["orders"]["acceptedAmountYen"] == expected_total
               == rehearsal_summary["orders"]["writtenAmountYen"])
-        samples = search_rehearsal(engineer, run_id, "orders", "")[:3]
+        samples = rehearsal_rows(engineer, run_id, "orders")[:3]
         for row in samples:
             _, src = order_by_id[row["externalOrderId"]]
             if row["amountYen"] != int(src[3]) or row["externalCustomerId"] != src[1]:
@@ -479,31 +563,39 @@ def run_uat_checks(engineer, reviewer, state, expected, rehearsal_summary, count
                     f"¥{rehearsal_summary['orders']['writtenAmountYen']:,}; 3 sampled orders match source amounts")
 
     def check_exclusions_absent():
-        missing = []
+        c_ids, o_ids = target_ids("customers"), target_ids("orders")
+        leaked = []
         for item in state["invalidRows"]:
             by_id = cust_by_id if item["kind"] == "CUSTOMERS" else order_by_id
-            kind_path = "customers" if item["kind"] == "CUSTOMERS" else "orders"
+            target = c_ids if item["kind"] == "CUSTOMERS" else o_ids
             external_id = next(ext for ext, (n, _) in by_id.items() if n == item["dataRowNumber"])
-            if search_rehearsal(engineer, run_id, kind_path, external_id):
-                missing.append(external_id)
-        if missing:
-            return False, f"excluded rows present in rehearsal target: {missing}"
+            if external_id in target:
+                leaked.append(external_id)
+        if leaked:
+            return False, f"excluded rows present in rehearsal target: {leaked}"
         return True, (f"all {len(state['invalidRows'])} excluded source rows are absent from the rehearsal "
-                      f"targets; no excluded key was found")
+                      f"targets (full key-set comparison, not sampling)")
 
     def check_provenance():
+        # Source-file identity: the stored SHA-256 from the upload response
+        # must equal the hash of the checked-in fixture bytes.
+        for kind, fixture, key in (("customers", "customers_1000.csv", "customersSha256"),
+                                   ("orders", "orders_2000.csv", "ordersSha256")):
+            digest = hashlib.sha256((FIXTURES / fixture).read_bytes()).hexdigest()
+            if state.get(key) != digest:
+                return False, f"{kind}: stored file sha256 {state.get(key)} != fixture bytes {digest}"
         status, run = engineer.request("GET", f"/api/v1/runs/{run_id}")
         expect(status, 200, "run detail for provenance", run)
         if run["manifestId"] != state["manifestId"]:
             return False, f"run manifest {run['manifestId']} != frozen manifest {state['manifestId']}"
         for kind, by_id in (("customers", cust_by_id), ("orders", order_by_id)):
-            for row in search_rehearsal(engineer, run_id, kind, "")[:3]:
+            for row in rehearsal_rows(engineer, run_id, kind)[:3]:
                 ext = row["externalCustomerId"] if kind == "customers" else row["externalOrderId"]
-                expected_row_no = by_id[ext][0]
-                if row["sourceRowNumber"] != expected_row_no:
-                    return False, f"{ext}: source_row_number {row['sourceRowNumber']} != CSV row {expected_row_no}"
-        return True, ("sampled rehearsal rows carry source row numbers matching the fixture CSV positions, "
-                      f"and the run is bound to frozen manifest {state['manifestId']}")
+                if row["sourceRowNumber"] != by_id[ext][0]:
+                    return False, f"{ext}: source_row_number {row['sourceRowNumber']} != CSV row {by_id[ext][0]}"
+        return True, ("source files verified by SHA-256 against the checked-in fixture bytes; sampled rows "
+                      "carry source row numbers matching their CSV positions; the run is bound to the frozen "
+                      f"manifest {state['manifestId']}")
 
     checks = {
         "COUNTS_MATCH": check_counts,
@@ -515,7 +607,7 @@ def run_uat_checks(engineer, reviewer, state, expected, rehearsal_summary, count
     for key, fn in checks.items():
         case = cases.get(key)
         if case is None:
-            die(f"required UAT case {key} was not seeded for the rehearsal")
+            fail(f"required UAT case {key} was not seeded for the rehearsal")
         if case.get("latestResult") == "PASS":
             print(f"  UAT {key}: already PASS, skipping")
             continue
@@ -526,8 +618,44 @@ def run_uat_checks(engineer, reviewer, state, expected, rehearsal_summary, count
         expect(status, 201, f"record UAT execution {key}", _)
         print(f"  UAT {key}: {'PASS' if ok else 'FAIL'} - {actual}")
         if not ok:
-            register(engineer, state, "FAILED", "uat", failure=f"UAT check {key} failed: {actual}")
-            die(f"UAT check {key} FAILED (recorded as FAIL): {actual}")
+            fail(f"UAT check {key} FAILED (recorded as FAIL): {actual}")
+
+
+# ----------------------------------------------------------------------
+
+def main():
+    if not TOKEN:
+        print("BOOTSTRAP FAILED: MIGRATEFLOW_SHOWCASE_BOOTSTRAP_TOKEN is not set", file=sys.stderr)
+        sys.exit(1)
+    expected = json.loads((FIXTURES / "expected_results.json").read_text())
+
+    print(f"[1/6] Waiting for backend and signing in demo actors against {BASE} ...")
+    wait_for_backend()
+    admin = Client("admin"); admin.login(*creds("ADMIN"))
+    engineer = Client("engineer"); engineer.login(*creds("ENGINEER"))
+    reviewer = Client("reviewer"); reviewer.login(*creds("REVIEWER"))
+    auditor = Client("auditor"); auditor.login(*creds("AUDITOR"))
+
+    state, existing = adopt_state(admin, engineer)
+    if existing and existing.get("setupState") == "READY":
+        print(f"Showcase '{SLUG}' is already bootstrapped and READY "
+              f"(project {existing.get('projectId')}, cutover {existing.get('cutoverRunId')}).")
+        verify_ready_publicly()
+        return
+    if existing:
+        print(f"  resuming from registry state {existing.get('setupState')} at step {existing.get('setupStep')}")
+
+    try:
+        run_stages(admin, engineer, reviewer, auditor, state, expected)
+    except BootstrapError as exc:
+        # Fail closed (S-13): record FAILED with the original reason,
+        # best effort, then exit non-zero with the same reason.
+        try:
+            register(admin, state, "FAILED", state.get("step"), failure=str(exc))
+        except Exception as reg_exc:
+            print(f"  warning: could not record FAILED in the registry: {reg_exc}")
+        print(f"BOOTSTRAP FAILED: {exc}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
