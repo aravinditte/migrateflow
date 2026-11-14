@@ -1,0 +1,19 @@
+# Build output
+backend/target/
+frontend/dist/
+frontend/node_modules/
+
+# Local data and environment
+.env
+data/
+*.log
+
+# Tooling state (local to a developer machine / agent VM - not part of the product)
+.muse-github-snapshot-sync.json
+.muse-github-snapshot-sync.json.sha256
+mvn-local.sh
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
