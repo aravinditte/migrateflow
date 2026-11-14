@@ -212,16 +212,113 @@ def register(admin: Client, state, setup_state, step, failure=None):
     return payload
 
 
+def recover_state_from_backend(admin: Client, engineer: Client, reviewer: Client, state: dict, expected: dict):
+    """Authoritative DB recovery (MF-003): recovers state from PostgreSQL
+    rather than depending on local cache. Re-validates artifact IDs, loads
+    validation counts and exclusion decisions from DB, reads upload profile
+    fingerprints, and checks rehearsal/cutover status."""
+    status, existing = admin.request(
+        "GET", f"/api/v1/internal/showcase/scenario?slug={SLUG}",
+        headers={"X-Showcase-Bootstrap-Token": TOKEN})
+    if status == 200 and isinstance(existing, dict):
+        if state.get("registryId") and state["registryId"] != existing.get("id"):
+            print("  local state cache belongs to a different registry ID; discarding local cache")
+            state.clear()
+        for key in ARTIFACT_KEYS:
+            if existing.get(key):
+                state[key] = existing[key]
+        state["registryId"] = existing.get("id")
+        state["setupState"] = existing.get("setupState")
+        state["setupStep"] = existing.get("setupStep")
+    elif status not in (404,):
+        fail(f"registry lookup failed: HTTP {status} {existing}")
+
+    # Re-verify and recover bundle file profile
+    bid = state.get("bundleId")
+    if bid:
+        s_prof, prof = engineer.request("GET", f"/api/v1/bundles/{bid}/profile")
+        if s_prof == 200 and "files" in prof:
+            for f in prof["files"]:
+                k = f.get("kind")
+                if k == "CUSTOMERS":
+                    state["customersFileId"] = f.get("fileId")
+                    state["customersSha256"] = f.get("sha256")
+                elif k == "ORDERS":
+                    state["ordersFileId"] = f.get("fileId")
+                    state["ordersSha256"] = f.get("sha256")
+        else:
+            print(f"  warning: bundle {bid} profile unavailable (HTTP {s_prof}); clearing bundle state")
+            state.pop("bundleId", None)
+
+    # Re-verify and recover validation snapshot counts and decisions
+    snid = state.get("snapshotId")
+    if snid:
+        s_snap, snap = engineer.request("GET", f"/api/v1/validation-snapshots/{snid}")
+        if s_snap == 200 and snap.get("status") == "COMPLETED":
+            cnts = json.loads(snap["counts"]) if isinstance(snap["counts"], str) else snap["counts"]
+            state["counts"] = cnts
+
+            # Recover exclusions
+            s_excl, excl = reviewer.request("GET", f"/api/v1/validation-snapshots/{snid}/exclusions")
+            if s_excl == 200 and "content" in excl:
+                state["decidedRows"] = sorted({f"{e['kind']}:{e['sourceRowId']}" for e in excl["content"]})
+            else:
+                state["decidedRows"] = []
+
+            # Recover invalid rows
+            issues, p = [], 0
+            seen_issue_ids = set()
+            while True:
+                s_iss, res_iss = reviewer.request(
+                    "GET", f"/api/v1/validation-snapshots/{snid}/issues?size=50&page={p}")
+                if s_iss != 200:
+                    break
+                batch = res_iss.get("content", [])
+                for iss in batch:
+                    iid = iss.get("issueId")
+                    if iid not in seen_issue_ids:
+                        seen_issue_ids.add(iid)
+                        issues.append(iss)
+                eff_sz = res_iss.get("size", 50)
+                if len(batch) < eff_sz or p >= 10000:
+                    break
+                p += 1
+            invalid = {(i["kind"], i["sourceRowId"]): i for i in issues if i.get("severity") == "ERROR"}
+            state["invalidRows"] = [{"kind": k[0], "dataRowNumber": v["dataRowNumber"]} for k, v in invalid.items()]
+        elif s_snap != 200:
+            print(f"  warning: validation snapshot {snid} not found (HTTP {s_snap}); clearing snapshot state")
+            state.pop("snapshotId", None)
+
+    # Re-verify and recover manifest
+    mid = state.get("manifestId")
+    if mid:
+        s_man, man = engineer.request("GET", f"/api/v1/manifests/{mid}")
+        if s_man == 200:
+            state["manifestHash"] = man.get("manifestHash")
+            state["manifestStatus"] = man.get("status")
+        else:
+            print(f"  warning: manifest {mid} not found (HTTP {s_man}); clearing manifest state")
+            state.pop("manifestId", None)
+
+    # Re-verify rehearsal reconciliation
+    r_run_id = state.get("rehearsalRunId")
+    if r_run_id:
+        s_rrec, rrec = engineer.request("GET", f"/api/v1/runs/{r_run_id}/reconciliation")
+        if s_rrec == 200 and rrec.get("status") == "PASS":
+            state["rehearsalReportId"] = rrec.get("reportId")
+
+    save_state(state)
+    return state, existing if (status == 200 and isinstance(existing, dict)) else None
+
+
 def adopt_state(admin: Client, engineer: Client):
-    """Registry first (S-22): the local cache is trusted only when it
-    agrees with the registry or its artifacts still exist."""
+    """Backwards compatibility alias."""
     state = load_state_file()
     status, existing = admin.request(
         "GET", f"/api/v1/internal/showcase/scenario?slug={SLUG}",
         headers={"X-Showcase-Bootstrap-Token": TOKEN})
     if status == 200:
         if state.get("registryId") and state["registryId"] != existing.get("id"):
-            print("  local state cache belongs to a different database; discarding it")
             state = {}
         for key in ARTIFACT_KEYS:
             if existing.get(key):
@@ -229,20 +326,6 @@ def adopt_state(admin: Client, engineer: Client):
         state["registryId"] = existing.get("id")
         save_state(state)
         return state, existing
-    if status not in (404,):
-        fail(f"registry lookup failed: HTTP {status} {existing}")
-    # No registry row: validate any cached artifact IDs before trusting them.
-    if state.get("snapshotId"):
-        s2, _ = engineer.request("GET", f"/api/v1/validation-snapshots/{state['snapshotId']}")
-        if s2 != 200:
-            print("  cached snapshot no longer exists; discarding local state cache")
-            state = {}
-    elif state.get("projectId"):
-        s2, page = engineer.request("GET", "/api/v1/projects?size=100")
-        ids = [p["id"] for p in page.get("content", [])] if s2 == 200 else []
-        if state["projectId"] not in ids:
-            print("  cached project no longer exists; discarding local state cache")
-            state = {}
     return state, None
 
 
@@ -262,8 +345,10 @@ def verify_ready_publicly():
 # Workflow stages (all real HTTP operations)
 # ----------------------------------------------------------------------
 
-def wait_run(client: Client, run_id, label, timeout=900):
+def wait_run(client: Client, run_id, label, engineer: Client = None, max_restarts=2, timeout=900):
+    """Wait for a run to finish. Detects FAILED_RESTARTABLE and applies a bounded retry policy (MF-004)."""
     deadline = time.time() + timeout
+    restarts_left = max_restarts
     last = None
     while time.time() < deadline:
         status, run = client.request("GET", f"/api/v1/runs/{run_id}")
@@ -271,6 +356,16 @@ def wait_run(client: Client, run_id, label, timeout=900):
         last = run["status"]
         if last in ("VERIFIED", "VERIFICATION_FAILED", "FAILED_TERMINAL"):
             return run
+        if last == "FAILED_RESTARTABLE":
+            if restarts_left > 0 and engineer is not None:
+                print(f"  {label} run {run_id} is FAILED_RESTARTABLE; requesting restart ({restarts_left} left) ...")
+                s_rst, r_rst = engineer.request("POST", f"/api/v1/runs/{run_id}/restart")
+                expect(s_rst, 202, f"restart {label} run", r_rst)
+                restarts_left -= 1
+                time.sleep(3)
+                continue
+            else:
+                fail(f"{label} run {run_id} is FAILED_RESTARTABLE but restart budget exhausted")
         time.sleep(3)
     fail(f"{label} run {run_id} did not finish within {timeout}s (last status {last})")
 
@@ -370,36 +465,51 @@ def run_stages(admin, engineer, reviewer, auditor, state, expected):
     print(f"  validation COMPLETED: {counts}")
 
     print("[3/6] Reviewer exclusions for every invalid row ...")
-    issues, page = [], 0
-    while True:
-        status, result = reviewer.request(
-            "GET", f"/api/v1/validation-snapshots/{state['snapshotId']}/issues?size=100&page={page}")
-        expect(status, 200, "list validation issues", result)
-        issues.extend(result["content"])
-        if len(result["content"]) < 100:
-            break
-        page += 1
-    invalid = {(i["kind"], i["sourceRowId"]): i for i in issues if i["severity"] == "ERROR"}
-    decided = set(state.get("decidedRows", []))
-    for (kind, row_id), issue in invalid.items():
-        if f"{kind}:{row_id}" in decided:
-            continue
-        status, decision = reviewer.request(
-            "POST", f"/api/v1/validation-snapshots/{state['snapshotId']}/exclusions",
-            body={"dataset": kind, "sourceRowId": row_id, "decision": "EXCLUDE",
-                  "reason": f"Automated showcase review: {issue['code']} at data row "
-                            f"{issue['dataRowNumber']} - {issue['message']}"})
-        expect(status, 201, "record exclusion decision", decision)
-        decided.add(f"{kind}:{row_id}")
-        state["decidedRows"] = sorted(decided)
+    if state.get("manifestStatus") == "FROZEN" or (state.get("manifestId") and state.get("step") in ("freeze", "rehearsal", "uat", "approval", "cutover", "publish")):
+        print(f"  manifest {state.get('manifestId')} is already FROZEN; skipping new exclusions and using persisted decisions")
+    else:
+        issues, page = [], 0
+        seen_issue_ids = set()
+        while True:
+            status, result = reviewer.request(
+                "GET", f"/api/v1/validation-snapshots/{state['snapshotId']}/issues?size=50&page={page}")
+            expect(status, 200, "list validation issues", result)
+            batch = result.get("content", [])
+            ret_page = result.get("page", page)
+            if ret_page != page:
+                fail(f"server page clamping or mismatch detected for issues at page={page}, got {ret_page}")
+            for issue in batch:
+                issue_id = issue.get("issueId")
+                if issue_id not in seen_issue_ids:
+                    seen_issue_ids.add(issue_id)
+                    issues.append(issue)
+            effective_size = result.get("size", 50)
+            if len(batch) < effective_size:
+                break
+            page += 1
+            if page > 10000:
+                fail("exceeded maximum page count (10,000) during validation issues scan")
+        invalid = {(i["kind"], i["sourceRowId"]): i for i in issues if i.get("severity") == "ERROR"}
+        decided = set(state.get("decidedRows", []))
+        for (kind, row_id), issue in invalid.items():
+            if f"{kind}:{row_id}" in decided:
+                continue
+            status, decision = reviewer.request(
+                "POST", f"/api/v1/validation-snapshots/{state['snapshotId']}/exclusions",
+                body={"dataset": kind, "sourceRowId": row_id, "decision": "EXCLUDE",
+                      "reason": f"Automated showcase review: {issue['code']} at data row "
+                                f"{issue['dataRowNumber']} - {issue['message']}"})
+            expect(status, 201, "record exclusion decision", decision)
+            decided.add(f"{kind}:{row_id}")
+            state["decidedRows"] = sorted(decided)
+            save_state(state)
+        total_invalid = expected["customers"]["excludedRows"] + expected["orders"]["excludedRows"]
+        if len(invalid) != total_invalid:
+            fail(f"expected {total_invalid} invalid rows, saw {len(invalid)}")
+        state["invalidRows"] = [{"kind": k[0], "dataRowNumber": v["dataRowNumber"]} for k, v in invalid.items()]
         save_state(state)
-    total_invalid = expected["customers"]["excludedRows"] + expected["orders"]["excludedRows"]
-    if len(invalid) != total_invalid:
-        fail(f"expected {total_invalid} invalid rows, saw {len(invalid)}")
-    state["invalidRows"] = [{"kind": k[0], "dataRowNumber": v["dataRowNumber"]} for k, v in invalid.items()]
-    save_state(state)
-    register(admin, state, "PREPARING", "exclusions")
-    print(f"  {len(invalid)} invalid rows excluded by REVIEWER (none valid touched)")
+        register(admin, state, "PREPARING", "exclusions")
+        print(f"  {len(invalid)} invalid rows excluded by REVIEWER (none valid touched)")
 
     print("[4/6] Freeze manifest and run the real rehearsal ...")
     if not state.get("manifestId"):
@@ -411,6 +521,7 @@ def run_stages(admin, engineer, reviewer, auditor, state, expected):
             fail(f"manifest is not FROZEN: {manifest}")
         state["manifestId"] = manifest["manifestId"]
         state["manifestHash"] = manifest["manifestHash"]
+        state["manifestStatus"] = "FROZEN"
         save_state(state)
         register(admin, state, "PREPARING", "freeze")
 
@@ -419,7 +530,7 @@ def run_stages(admin, engineer, reviewer, auditor, state, expected):
         expect(status, 202, "launch rehearsal", launched)
         state["rehearsalRunId"] = launched["runId"]
         save_state(state)
-    run = wait_run(engineer, state["rehearsalRunId"], "rehearsal")
+    run = wait_run(engineer, state["rehearsalRunId"], "rehearsal", engineer=engineer)
     if run["status"] != "VERIFIED":
         fail(f"rehearsal did not verify: {run}")
     register(admin, state, "PREPARING", "rehearsal")
@@ -460,7 +571,7 @@ def run_stages(admin, engineer, reviewer, auditor, state, expected):
         expect(status, 202, "launch cutover", launched)
         state["cutoverRunId"] = launched["runId"]
         save_state(state)
-    run = wait_run(engineer, state["cutoverRunId"], "cutover")
+    run = wait_run(engineer, state["cutoverRunId"], "cutover", engineer=engineer)
     if run["status"] != "VERIFIED":
         fail(f"cutover did not verify: {run}")
     status, final_report = engineer.request("GET", f"/api/v1/runs/{state['cutoverRunId']}/reconciliation")
@@ -485,13 +596,26 @@ def run_stages(admin, engineer, reviewer, auditor, state, expected):
 
 def rehearsal_rows(client, run_id, kind):
     rows, page = [], 0
+    seen_ids = set()
     while True:
-        status, result = client.request("GET", f"/api/v1/rehearsals/{run_id}/{kind}?size=100&page={page}")
+        status, result = client.request("GET", f"/api/v1/rehearsals/{run_id}/{kind}?size=50&page={page}")
         expect(status, 200, f"list rehearsal {kind}", result)
-        rows.extend(result["content"])
-        if len(result["content"]) < 100:
+        batch = result.get("content", [])
+        ret_page = result.get("page", page)
+        if ret_page != page:
+            fail(f"server page clamping or mismatch detected at page={page}, got {ret_page}")
+        for r in batch:
+            row_id = r.get("id")
+            if row_id in seen_ids:
+                fail(f"duplicate record detected during rehearsal pagination at page {page}: {row_id}")
+            seen_ids.add(row_id)
+            rows.append(r)
+        effective_size = result.get("size", 50)
+        if len(batch) < effective_size:
             return rows
         page += 1
+        if page > 10000:
+            fail(f"exceeded maximum page count (10,000) during rehearsal {kind} scan")
 
 
 def search_rehearsal(client, run_id, kind, q):
@@ -629,31 +753,33 @@ def main():
         sys.exit(1)
     expected = json.loads((FIXTURES / "expected_results.json").read_text())
 
-    print(f"[1/6] Waiting for backend and signing in demo actors against {BASE} ...")
-    wait_for_backend()
-    admin = Client("admin"); admin.login(*creds("ADMIN"))
-    engineer = Client("engineer"); engineer.login(*creds("ENGINEER"))
-    reviewer = Client("reviewer"); reviewer.login(*creds("REVIEWER"))
-    auditor = Client("auditor"); auditor.login(*creds("AUDITOR"))
-
-    state, existing = adopt_state(admin, engineer)
-    if existing and existing.get("setupState") == "READY":
-        print(f"Showcase '{SLUG}' is already bootstrapped and READY "
-              f"(project {existing.get('projectId')}, cutover {existing.get('cutoverRunId')}).")
-        verify_ready_publicly()
-        return
-    if existing:
-        print(f"  resuming from registry state {existing.get('setupState')} at step {existing.get('setupStep')}")
+    admin = Client("admin")
+    state = load_state_file()
 
     try:
+        print(f"[1/6] Waiting for backend and signing in demo actors against {BASE} ...")
+        wait_for_backend()
+        admin.login(*creds("ADMIN"))
+        engineer = Client("engineer"); engineer.login(*creds("ENGINEER"))
+        reviewer = Client("reviewer"); reviewer.login(*creds("REVIEWER"))
+        auditor = Client("auditor"); auditor.login(*creds("AUDITOR"))
+
+        state, existing = recover_state_from_backend(admin, engineer, reviewer, state, expected)
+        if existing and existing.get("setupState") == "READY":
+            print(f"Showcase '{SLUG}' is already bootstrapped and READY "
+                  f"(project {existing.get('projectId')}, cutover {existing.get('cutoverRunId')}).")
+            verify_ready_publicly()
+            return
+        if existing:
+            print(f"  resuming from registry state {existing.get('setupState')} at step {existing.get('setupStep')}")
+
         run_stages(admin, engineer, reviewer, auditor, state, expected)
-    except BootstrapError as exc:
-        # Fail closed (S-13): record FAILED with the original reason,
-        # best effort, then exit non-zero with the same reason.
+    except Exception as exc:
+        # Fail closed (MF-012): record FAILED with the original reason in registry if possible
         try:
-            register(admin, state, "FAILED", state.get("step"), failure=str(exc))
+            register(admin, state, "FAILED", state.get("step", "init"), failure=str(exc))
         except Exception as reg_exc:
-            print(f"  warning: could not record FAILED in the registry: {reg_exc}")
+            print(f"  warning: could not record FAILED in the registry: {reg_exc}", file=sys.stderr)
         print(f"BOOTSTRAP FAILED: {exc}", file=sys.stderr)
         sys.exit(1)
 

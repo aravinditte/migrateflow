@@ -90,9 +90,9 @@ public class IntakeController {
                                     @RequestParam(defaultValue = "50") int size, Authentication auth) {
         AppUser actor = SecurityConfig.requireUser(users, auth);
         access.requireProjectRole(actor, access.projectOfFile(fileId), "ENGINEER", "AUDITOR");
-        int validPage = PageRequestUtil.validatePage(page);
-        int validSize = PageRequestUtil.validateSize(size);
-        int offset = PageRequestUtil.safeOffset(validPage, validSize);
+        int validPage = PageRequestUtil.clampPage(page);
+        int validSize = PageRequestUtil.clampSize(size);
+        long offset = PageRequestUtil.safeOffset(validPage, validSize);
         String kind = jdbc.query("SELECT kind FROM control.source_files WHERE id = ?",
                 (rs, n) -> rs.getString("kind"), fileId).stream().findFirst()
                 .orElseThrow(() -> ApiException.notFound("File"));

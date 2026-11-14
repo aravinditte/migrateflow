@@ -143,9 +143,9 @@ public class PlanController {
                         + "LEFT JOIN stage.customer_input_rows cr ON cr.id = i.source_row_id "
                         + "LEFT JOIN stage.order_input_rows orr ON orr.id = i.source_row_id "
                         + "WHERE i.snapshot_id = ?");
-        int validPage = PageRequestUtil.validatePage(page);
-        int validSize = PageRequestUtil.validateSize(size);
-        int offset = PageRequestUtil.safeOffset(validPage, validSize);
+        int validPage = PageRequestUtil.clampPage(page);
+        int validSize = PageRequestUtil.clampSize(size);
+        long offset = PageRequestUtil.safeOffset(validPage, validSize);
         java.util.List<Object> args = new java.util.ArrayList<>();
         args.add(snapshotId);
         if (kind != null) { sql.append(" AND i.kind = ?"); args.add(kind); }

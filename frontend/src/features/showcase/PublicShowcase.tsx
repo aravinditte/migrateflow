@@ -1,4 +1,5 @@
 import { showcaseApi } from '../../lib/showcase';
+import type { ShowcaseOverview } from '../../lib/showcase';
 import { useShowcase } from './useShowcase';
 import ShowcaseHero from './ShowcaseHero';
 import ShowcaseMetrics from './ShowcaseMetrics';
@@ -16,31 +17,7 @@ import ShowcaseArchitecture from './ShowcaseArchitecture';
  * down or no verified scenario exists, this page says so plainly instead
  * of showing placeholder success.
  */
-export default function PublicShowcase({ onSignIn }: { onSignIn: () => void }) {
-  const load = useShowcase(() => showcaseApi.overview(), []);
-
-  if (load.state === 'loading') {
-    return (
-      <main>
-        <h1>Migrate<span>Flow</span></h1>
-        <p className="muted">Loading live migration evidence from the backend…</p>
-      </main>
-    );
-  }
-  if (load.state === 'error') {
-    return (
-      <main>
-        <h1>Migrate<span>Flow</span></h1>
-        <p className="error">
-          Live evidence temporarily unavailable — the backend could not be reached, so no results are
-          shown. MigrateFlow never substitutes cached or fabricated figures.
-        </p>
-        <button className="secondary" onClick={onSignIn}>Operator sign in</button>
-      </main>
-    );
-  }
-
-  const overview = load.data;
+export function ShowcaseView({ overview, onSignIn }: { overview: ShowcaseOverview; onSignIn: () => void }) {
   if (overview.setupState === 'NOT_READY' || overview.setupState === 'PREPARING') {
     return (
       <main>
@@ -74,20 +51,37 @@ export default function PublicShowcase({ onSignIn }: { onSignIn: () => void }) {
   return (
     <main className="showcase">
       <ShowcaseHero overview={overview} onSignIn={onSignIn} />
-      {overview.setupState === 'STALE' && (
-        <p className="error">
-          Integrity alert: the historical cutover evidence below is real, but a fresh lineage re-check
-          no longer passes ({overview.integrityProblems.join('; ')}). The historical verification time
-          still applies to the original run.
-        </p>
-      )}
       <ShowcaseMetrics overview={overview} />
-      <ShowcaseTimeline />
-      <ShowcaseValidation />
-      <ShowcaseBeforeAfter />
-      <ShowcaseReconciliation />
-      <ShowcaseUatApproval />
-      <ShowcaseAudit />
+      {overview.setupState === 'STALE' ? (
+        <section className="card">
+          <h2>Lineage Integrity Alert</h2>
+          <p className="error">
+            The historical cutover evidence is authentic, but a fresh lineage re-verification no longer passes:
+          </p>
+          <ul className="error">
+            {overview.integrityProblems.map((p: string, i: number) => (
+              <li key={i}>{p}</li>
+            ))}
+          </ul>
+          <p className="muted">
+            Last verified at: {overview.verification?.verifiedAt || 'Not available'} · Cutover completed at: {overview.verification?.cutoverReconciliationCompletedAt || 'Not available'}
+          </p>
+          <p className="muted">
+            Detail sections (timeline, validation issues, migrated records, UAT executions, and audit log) are
+            temporarily unavailable because the backend fails closed (HTTP 503) when live lineage verification does not pass.
+            The metrics above reflect the historical cutover run.
+          </p>
+        </section>
+      ) : (
+        <>
+          <ShowcaseTimeline />
+          <ShowcaseValidation />
+          <ShowcaseBeforeAfter />
+          <ShowcaseReconciliation />
+          <ShowcaseUatApproval />
+          <ShowcaseAudit />
+        </>
+      )}
       <ShowcaseArchitecture />
       <footer className="muted">
         Synthetic data · authentic execution · automated demonstration actors · portfolio demonstration,
@@ -95,4 +89,31 @@ export default function PublicShowcase({ onSignIn }: { onSignIn: () => void }) {
       </footer>
     </main>
   );
+}
+
+export default function PublicShowcase({ onSignIn }: { onSignIn: () => void }) {
+  const load = useShowcase(() => showcaseApi.overview(), []);
+
+  if (load.state === 'loading') {
+    return (
+      <main>
+        <h1>Migrate<span>Flow</span></h1>
+        <p className="muted">Loading live migration evidence from the backend…</p>
+      </main>
+    );
+  }
+  if (load.state === 'error') {
+    return (
+      <main>
+        <h1>Migrate<span>Flow</span></h1>
+        <p className="error">
+          Live evidence temporarily unavailable — the backend could not be reached, so no results are
+          shown. MigrateFlow never substitutes cached or fabricated figures.
+        </p>
+        <button className="secondary" onClick={onSignIn}>Operator sign in</button>
+      </main>
+    );
+  }
+
+  return <ShowcaseView overview={load.data} onSignIn={onSignIn} />;
 }

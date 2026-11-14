@@ -20,6 +20,16 @@ public final class PageRequestUtil {
         return Math.min(MAX_PAGE_SIZE, Math.max(1, size));
     }
 
+    /** Alias for {@link #clampPage(int)}. */
+    public static int validatePage(int page) {
+        return clampPage(page);
+    }
+
+    /** Alias for {@link #clampSize(int)}. */
+    public static int validateSize(int size) {
+        return clampSize(size);
+    }
+
     public static long safeOffset(int page, int size) {
         return (long) clampPage(page) * clampSize(size);
     }
