@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Live backend-to-TypeScript contract verification (MF-011).
+Live backend-to-TypeScript contract verification (MF-011 / MF-A02).
 Fetches live responses from all public showcase endpoints and validates
 them against the exact schemas and field types required by the frontend.
 
@@ -19,36 +19,50 @@ def get(path):
     try:
         with urllib.request.urlopen(req, timeout=30) as resp:
             return resp.status, json.loads(resp.read().decode())
+    except urllib.error.HTTPError as e:
+        try:
+            body = json.loads(e.read().decode())
+        except Exception:
+            body = None
+        return e.code, body
     except Exception as e:
         errors.append(f"GET {path} failed: {e}")
         return None, None
 
-def require_fields(obj, expected_fields, name):
+def require_fields(obj, expected_fields, name, optional_fields=None):
     if not isinstance(obj, dict):
         errors.append(f"{name} is not an object: {type(obj)}")
         return
     for field, expected_type in expected_fields.items():
         if field not in obj:
-            errors.append(f"{name} missing field {field!r}")
+            errors.append(f"{name} missing required field {field!r}")
         elif obj[field] is not None and not isinstance(obj[field], expected_type):
             errors.append(f"{name}.{field} expected {expected_type}, got {type(obj[field])}")
+    if optional_fields:
+        for field, expected_type in optional_fields.items():
+            if field in obj and obj[field] is not None and not isinstance(obj[field], expected_type):
+                errors.append(f"{name}.{field} expected {expected_type}, got {type(obj[field])}")
 
 def main():
     print(f"Testing live contracts against {BASE} ...")
 
     # 1. Overview
     s, overview = get("/api/v1/showcase/overview")
-    if s == 200:
+    if s != 200:
+        errors.append(f"GET /api/v1/showcase/overview returned status {s}")
+    else:
         require_fields(overview, {
             "showcase": str, "mode": str, "dataClassification": str,
             "setupState": str, "setupStep": (str, type(None)),
             "integrity": str, "integrityProblems": list,
-            "integrityCheckedAt": str, "failureMessage": (str, type(None)),
+            "integrityCheckedAt": str,
             "backend": dict, "project": (dict, type(None)),
             "validation": (dict, type(None)),
             "rehearsal": (dict, type(None)), "cutover": (dict, type(None)),
             "money": (dict, type(None)), "verification": (dict, type(None)),
-        }, "ShowcaseOverview")
+        }, "ShowcaseOverview", optional_fields={
+            "failureMessage": str,
+        })
         if overview.get("validation"):
             require_fields(overview["validation"], {
                 "rawCustomers": int, "rawOrders": int,
@@ -72,7 +86,9 @@ def main():
 
     # 2. Workflow
     s, wf = get("/api/v1/showcase/workflow")
-    if s == 200:
+    if s != 200:
+        errors.append(f"GET /api/v1/showcase/workflow returned status {s}")
+    else:
         require_fields(wf, {"setupState": str, "stages": list}, "ShowcaseWorkflow")
         for stage in wf.get("stages", []):
             require_fields(stage, {
@@ -84,7 +100,9 @@ def main():
     # 3. Reconciliation (both scopes)
     for scope in ("rehearsal", "cutover"):
         s, rec = get(f"/api/v1/showcase/reconciliation?scope={scope}")
-        if s == 200:
+        if s != 200:
+            errors.append(f"GET /api/v1/showcase/reconciliation?scope={scope} returned status {s}")
+        else:
             require_fields(rec, {
                 "scope": str, "runId": str, "status": str,
                 "evidenceHash": str, "completedAt": str, "summary": dict,
@@ -103,7 +121,9 @@ def main():
 
     # 4. UAT
     s, uat = get("/api/v1/showcase/uat")
-    if s == 200:
+    if s != 200:
+        errors.append(f"GET /api/v1/showcase/uat returned status {s}")
+    else:
         require_fields(uat, {
             "cases": list, "defects": list, "uatEvidenceHash": str,
             "approvalStatus": (str, type(None)), "approvedByRole": (str, type(None)),
@@ -120,7 +140,9 @@ def main():
     # 5. Records
     for kind in ("customers", "orders"):
         s, recs = get(f"/api/v1/showcase/records?kind={kind}&size=3")
-        if s == 200:
+        if s != 200:
+            errors.append(f"GET /api/v1/showcase/records?kind={kind} returned status {s}")
+        else:
             require_fields(recs, {"content": list, "page": int, "size": int}, f"RecordPage[{kind}]")
             for r in recs.get("content", []):
                 require_fields(r, {
@@ -132,7 +154,9 @@ def main():
 
     # 6. Validation
     s, val = get("/api/v1/showcase/validation?size=5")
-    if s == 200:
+    if s != 200:
+        errors.append(f"GET /api/v1/showcase/validation returned status {s}")
+    else:
         require_fields(val, {"content": list, "page": int, "size": int}, "ValidationPage")
         for iss in val.get("content", []):
             require_fields(iss, {
@@ -141,19 +165,52 @@ def main():
             }, "ValidationIssue")
         print("  ok Validation contract")
 
-    # 7. Audit
+    # 7. Audit (actorRole verified matching ShowcaseDto.AuditRow & frontend AuditRow)
     s, audit = get("/api/v1/showcase/audit?size=5")
-    if s == 200:
+    if s != 200:
+        errors.append(f"GET /api/v1/showcase/audit returned status {s}")
+    else:
         require_fields(audit, {"content": list, "page": int, "size": int}, "AuditPage")
         for a in audit.get("content", []):
             require_fields(a, {
-                "action": str, "entityType": str, "role": str, "occurredAt": str,
+                "action": str, "entityType": str, "actorRole": str, "occurredAt": str,
             }, "AuditRow")
         print("  ok Audit contract")
 
-    # 8. Evidence
+    # 8. Mapping
+    s, mapping = get("/api/v1/showcase/mapping")
+    if s != 200:
+        errors.append(f"GET /api/v1/showcase/mapping returned status {s}")
+    else:
+        require_fields(mapping, {
+            "revisionId": str, "revisionNo": int, "definitionHash": str,
+            "definition": str, "ruleSetRevisionId": str, "ruleHash": str, "rules": str,
+        }, "MappingView")
+        try:
+            parsed_def = json.loads(mapping.get("definition", "{}"))
+            if not isinstance(parsed_def, dict):
+                errors.append("MappingView.definition is not a JSON object")
+            else:
+                for dataset in ("customers", "orders"):
+                    if dataset not in parsed_def or not isinstance(parsed_def[dataset], list):
+                        errors.append(f"MappingView.definition missing array {dataset!r}")
+                    else:
+                        for idx, fm in enumerate(parsed_def[dataset]):
+                            require_fields(fm, {
+                                "sourceColumn": str, "targetField": str,
+                                "steps": list, "required": bool,
+                            }, f"MappingView.definition.{dataset}[{idx}]")
+                            for sidx, step in enumerate(fm.get("steps", [])):
+                                require_fields(step, {"operation": str}, f"MappingView.definition.{dataset}[{idx}].steps[{sidx}]")
+        except json.JSONDecodeError as jde:
+            errors.append(f"Failed to parse MappingView.definition JSON: {jde}")
+        print("  ok Mapping contract")
+
+    # 9. Evidence
     s, ev = get("/api/v1/showcase/evidence")
-    if s == 200:
+    if s != 200:
+        errors.append(f"GET /api/v1/showcase/evidence returned status {s}")
+    else:
         require_fields(ev, {
             "showcase": str, "dataClassification": str, "label": str,
             "overview": dict, "workflow": dict, "reconciliationRehearsal": dict,

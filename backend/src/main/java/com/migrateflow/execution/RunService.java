@@ -89,8 +89,8 @@ public class RunService {
             jdbc.update("INSERT INTO control.runs (id, project_id, manifest_id, kind, status, requested_by, expected_accepted_rows) "
                             + "VALUES (?,?,?,'REHEARSAL','QUEUED',?,?)",
                     runId, projectId, manifestId, actor.id(), acceptedRows.acceptedCount(snapshotId));
+            audit.record(projectId, actor.id(), "REHEARSAL_LAUNCHED", "run", runId, Map.of("manifestId", manifestId.toString()));
         });
-        audit.record(projectId, actor.id(), "REHEARSAL_LAUNCHED", "run", runId, Map.of("manifestId", manifestId.toString()));
         executor.execute(() -> executeRun(runId));
         return runId;
     }
@@ -134,7 +134,10 @@ public class RunService {
             if ("RESERVED".equals(slot.get("status")) && slot.get("active_run_id") != null) {
                 throw ApiException.conflict("JOB_ALREADY_RUNNING", "Another cutover already holds the final target slot");
             }
-            if (!"FROZEN".equals(manifest.get("status"))) {
+            // MF-A06: Re-read and lock manifest after project lock
+            Map<String, Object> currentManifest = jdbc.queryForMap(
+                    "SELECT id, project_id, snapshot_id, status FROM control.manifests WHERE id = ? FOR UPDATE", manifestId);
+            if (!projectId.equals(currentManifest.get("project_id")) || !"FROZEN".equals(currentManifest.get("status"))) {
                 throw ApiException.conflict("PLAN_CHANGED", "Manifest is not the current frozen plan");
             }
             Map<String, Object> approval = jdbc.queryForMap(
@@ -159,7 +162,7 @@ public class RunService {
             }
             UUID rehearsalRunId = (UUID) approval.get("rehearsal_run_id");
 
-            // MF-011: Lock rehearsal run during preflight so UAT cannot mutate concurrently
+            // MF-A05: Lock rehearsal run during preflight so UAT cannot mutate concurrently
             jdbc.queryForObject("SELECT id FROM control.runs WHERE id = ? FOR UPDATE", UUID.class, rehearsalRunId);
 
             String rehearsalStatus = jdbc.queryForObject(
@@ -167,11 +170,20 @@ public class RunService {
             if (!"VERIFIED".equals(rehearsalStatus)) {
                 throw ApiException.unprocessable("INVALID_REFERENCE", "The approved rehearsal is not verified");
             }
-            String reportStatus = jdbc.queryForObject(
-                    "SELECT status FROM control.reconciliation_reports WHERE id = ?", String.class,
-                    (UUID) approval.get("reconciliation_report_id"));
-            if (!"PASS".equals(reportStatus)) {
-                throw ApiException.unprocessable("RECONCILIATION_FAILED", "The approved reconciliation report is not PASS");
+            // MF-A07 & MF-A29: Verify the approved report is the latest completed report and is PASS
+            UUID approvedReportId = (UUID) approval.get("reconciliation_report_id");
+            List<Map<String, Object>> latestReports = jdbc.queryForList(
+                    "SELECT id, status FROM control.reconciliation_reports WHERE run_id = ? ORDER BY completed_at DESC, id DESC LIMIT 1",
+                    rehearsalRunId);
+            if (latestReports.isEmpty()) {
+                throw ApiException.unprocessable("RECONCILIATION_FAILED", "No reconciliation report found for the rehearsal");
+            }
+            Map<String, Object> latestReport = latestReports.get(0);
+            if (!approvedReportId.equals(latestReport.get("id"))) {
+                throw ApiException.unprocessable("RECONCILIATION_STALE", "A newer reconciliation report exists for this rehearsal run");
+            }
+            if (!"PASS".equals(latestReport.get("status"))) {
+                throw ApiException.unprocessable("RECONCILIATION_FAILED", "The latest reconciliation report is not PASS");
             }
             // The approval bound the UAT evidence as it stood when it was
             // signed. Recompute it NOW, inside the preflight transaction: a
@@ -192,7 +204,7 @@ public class RunService {
             if (targetRows != null && targetRows > 0) {
                 throw ApiException.conflict("TARGET_NOT_EMPTY", "The final target is not empty");
             }
-            UUID snapshotId = (UUID) manifest.get("snapshot_id");
+            UUID snapshotId = (UUID) currentManifest.get("snapshot_id");
             UUID newRunId = UUID.randomUUID();
             jdbc.update("INSERT INTO control.runs (id, project_id, manifest_id, kind, status, requested_by, approval_id, request_key, expected_accepted_rows) "
                             + "VALUES (?,?,?,'CUTOVER','QUEUED',?,?,?,?)",
@@ -244,8 +256,8 @@ public class RunService {
             if (claimed == 0) {
                 throw ApiException.conflict("JOB_NOT_RESTARTABLE", "Only a failed restartable run can be restarted");
             }
+            audit.record(projectId, actor.id(), "RUN_RESTARTED", "run", runId, Map.of());
         });
-        audit.record(projectId, actor.id(), "RUN_RESTARTED", "run", runId, Map.of());
         executor.execute(() -> executeRun(runId));
     }
 

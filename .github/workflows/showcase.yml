@@ -71,16 +71,31 @@ jobs:
           MIGRATEFLOW_AUDITOR_PASSWORD: "auditor-ci-pw"
           MIGRATEFLOW_ADMIN_PASSWORD: "admin-ci-pw"
         run: |
+          set -euo pipefail
           chmod +x ./mvnw
-          ./mvnw spring-boot:start -Dspring-boot.run.arguments="--server.port=8081" &
-          echo "Waiting for Spring Boot backend to become ready..."
+          ./mvnw -B -DskipTests package
+          nohup java -Dserver.port=8081 -jar target/migrateflow-backend-1.0.0.jar > /tmp/migrateflow-backend.log 2>&1 &
+          backend_pid=$!
+          echo "Started backend PID $backend_pid, waiting for health check..."
+          ready=false
           for i in {1..60}; do
-            if curl -s http://localhost:8081/actuator/health | grep -q "UP"; then
-              echo "Backend is UP!"
+            if ! kill -0 "$backend_pid" 2>/dev/null; then
+              echo "Backend process exited unexpectedly during startup!" >&2
+              cat /tmp/migrateflow-backend.log >&2
+              exit 1
+            fi
+            if curl -fsS http://127.0.0.1:8081/actuator/health 2>/dev/null | grep -q '"status":"UP"'; then
+              echo "Backend is UP and healthy!"
+              ready=true
               break
             fi
             sleep 2
           done
+          if [ "$ready" != "true" ]; then
+            echo "Backend failed to become healthy within 120s!" >&2
+            cat /tmp/migrateflow-backend.log >&2
+            exit 1
+          fi
 
       - name: Execute real Python bootstrap orchestration (Run 1)
         env:
@@ -131,3 +146,11 @@ jobs:
           rm -f /tmp/showcase-state.json
           python3 scripts/bootstrap-showcase.py
           python3 scripts/verify-showcase.py
+
+      - name: Upload backend startup logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-log
+          path: /tmp/migrateflow-backend.log
+          if-no-files-found: ignore

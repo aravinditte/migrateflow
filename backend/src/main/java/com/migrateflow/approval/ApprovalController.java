@@ -16,6 +16,7 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
 
+import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 
@@ -57,8 +58,10 @@ public class ApprovalController {
         if (!java.util.List.of("APPROVE", "REJECT").contains(body.decision())) {
             throw ApiException.badRequest("INVALID_DECISION", "decision must be APPROVE or REJECT");
         }
+        // Lock project row to serialize workflow state mutations
+        jdbc.queryForObject("SELECT id FROM control.projects WHERE id = ? FOR UPDATE", UUID.class, projectId);
         Map<String, Object> manifest = jdbc.queryForMap(
-                "SELECT status, created_by FROM control.manifests WHERE id = ?", manifestId);
+                "SELECT status, created_by FROM control.manifests WHERE id = ? FOR UPDATE", manifestId);
         if (!"FROZEN".equals(manifest.get("status"))) {
             throw ApiException.conflict("PLAN_CHANGED", "Manifest is superseded and can no longer be approved");
         }
@@ -67,7 +70,7 @@ public class ApprovalController {
                     "The engineer who froze this manifest cannot approve it");
         }
         Map<String, Object> run = jdbc.queryForMap(
-                "SELECT manifest_id, kind, status FROM control.runs WHERE id = ?", body.rehearsalRunId());
+                "SELECT manifest_id, kind, status FROM control.runs WHERE id = ? FOR UPDATE", body.rehearsalRunId());
         if (!manifestId.equals(run.get("manifest_id")) || !"REHEARSAL".equals(run.get("kind"))) {
             throw ApiException.unprocessable("INVALID_REFERENCE", "Rehearsal does not belong to this manifest");
         }
@@ -75,11 +78,21 @@ public class ApprovalController {
             if (!"VERIFIED".equals(run.get("status"))) {
                 throw ApiException.unprocessable("INVALID_REFERENCE", "Rehearsal is not verified");
             }
-            Map<String, Object> report = jdbc.queryForMap(
-                    "SELECT run_id, status FROM control.reconciliation_reports WHERE id = ?", body.reconciliationReportId());
-            if (!body.rehearsalRunId().equals(report.get("run_id")) || !"PASS".equals(report.get("status"))) {
+            // MF-A07 / MF-A29: Must be the latest completed reconciliation report for this rehearsal
+            List<Map<String, Object>> latestReports = jdbc.queryForList(
+                    "SELECT id, run_id, status FROM control.reconciliation_reports WHERE run_id = ? ORDER BY completed_at DESC, id DESC LIMIT 1",
+                    body.rehearsalRunId());
+            if (latestReports.isEmpty()) {
+                throw ApiException.unprocessable("RECONCILIATION_NOT_FOUND", "No reconciliation report exists for this rehearsal");
+            }
+            Map<String, Object> latestReport = latestReports.get(0);
+            if (!body.reconciliationReportId().equals(latestReport.get("id"))) {
+                throw ApiException.unprocessable("RECONCILIATION_STALE",
+                        "The referenced reconciliation report is not the latest report for this rehearsal");
+            }
+            if (!"PASS".equals(latestReport.get("status"))) {
                 throw ApiException.unprocessable("RECONCILIATION_FAILED",
-                        "The referenced reconciliation report is not a PASS report for this rehearsal");
+                        "The latest reconciliation report is not a PASS report for this rehearsal");
             }
             String currentUatHash = uat.uatEvidenceHash(body.rehearsalRunId());
             if (!currentUatHash.equals(body.uatEvidenceHash())) {

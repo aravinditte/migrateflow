@@ -8,12 +8,20 @@ public final class CsvEscaping {
         if (value == null) return "";
         String v = value;
         if (!v.isEmpty()) {
-            char c = v.charAt(0);
-            if (c == '=' || c == '+' || c == '-' || c == '@' || c == '\t' || c == '\r') {
-                v = "'" + v;
+            String stripped = v.stripLeading();
+            if (!stripped.isEmpty()) {
+                char c = stripped.charAt(0);
+                if (c == '=' || c == '+' || c == '-' || c == '@' || c == '\t' || c == '\r') {
+                    v = "'" + v;
+                }
+            } else {
+                char c = v.charAt(0);
+                if (c == '\t' || c == '\r') {
+                    v = "'" + v;
+                }
             }
         }
-        if (v.contains(",") || v.contains("\"") || v.contains("\n")) {
+        if (v.contains(",") || v.contains("\"") || v.contains("\n") || v.contains("\r")) {
             v = '"' + v.replace("\"", "\"\"") + '"';
         }
         return v;

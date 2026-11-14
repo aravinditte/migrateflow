@@ -30,7 +30,7 @@ for both rehearsal and cutover.
 
 `ProcessRecoveryTest` covers startup recovery: a run left `RUNNING` by a
 terminated process is marked `FAILED_RESTARTABLE` (its stale batch
-executions abandoned) so the ordinary restart path can resume it. A test
+executions updated to `FAILED` in the Spring Batch repository) so the ordinary restart path can resume it. Interrupted validation snapshots fail closed to `FAILED` and require re-initiation. A test
 that kills a real OS process mid-batch is not part of the suite.
 
 `AcceptanceGapTest` covers the acceptance rows the first suite left thin:

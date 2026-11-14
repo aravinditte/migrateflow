@@ -23,9 +23,19 @@ export default function Uat({ flow, setError }: { flow: FlowContext; setError: (
 
   const execute = async (caseKey: string, result: string) => {
     setError('');
+    const defaultNote = result === 'PASS'
+      ? 'Observed matching target row counts and reconciliation output'
+      : 'Discrepancy observed in sample records';
+    const observation = (typeof window.prompt === 'function'
+      ? window.prompt(`Reviewer observation for ${caseKey} (${result}):`, defaultNote)
+      : defaultNote) || defaultNote;
+    if (!observation.trim()) {
+      setError('Observation is required to record a UAT result');
+      return;
+    }
     try {
       await api.post(`/api/v1/rehearsals/${flow.rehearsalRunId}/uat-executions`, {
-        caseKey, result, actualResult: result === 'PASS' ? 'Verified in rehearsal data' : 'See defect',
+        caseKey, result, actualResult: observation.trim(),
       });
       await load();
     } catch (e) { setError(message(e)); }
@@ -41,9 +51,21 @@ export default function Uat({ flow, setError }: { flow: FlowContext; setError: (
   };
   const patchDefect = async (defectId: string, status: string) => {
     setError('');
+    let note: string | undefined = undefined;
+    if (status === 'RESOLVED') {
+      const defaultNote = 'Fixed by revised plan; ready for retest';
+      const entered = typeof window.prompt === 'function'
+        ? window.prompt('Resolution note and plan reference:', defaultNote)
+        : defaultNote;
+      if (!entered || !entered.trim()) {
+        setError('Resolution note is required to resolve a defect');
+        return;
+      }
+      note = entered.trim();
+    }
     try {
       await api.patch(`/api/v1/defects/${defectId}`, {
-        status, resolutionNote: status === 'RESOLVED' ? 'Fixed by revised plan; ready for retest' : undefined,
+        status, resolutionNote: note,
       });
       await load();
     } catch (e) { setError(message(e)); }

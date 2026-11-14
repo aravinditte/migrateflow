@@ -9,13 +9,34 @@ export default function Exceptions({ flow, setError }: { flow: FlowContext; setE
   const [hasMore, setHasMore] = useState(false);
   const [reason, setReason] = useState('Confirmed against the source export; row is intentionally omitted');
   const [decided, setDecided] = useState<Record<string, string>>({});
+
+  useEffect(() => {
+    setDecided({});
+    setPage(0);
+  }, [flow.snapshotId]);
+
   const load = useCallback(async () => {
     if (!flow.snapshotId) return;
-    const res = await api.get<Page<Issue>>(`/api/v1/validation-snapshots/${flow.snapshotId}/issues?page=${page}&size=50`);
-    setIssues(res.content);
-    setHasMore(res.content.length === 50);
-  }, [flow.snapshotId, page]);
-  useEffect(() => { load().catch((e) => setError(message(e))); }, [load, setError]);
+    try {
+      const [res, exclRes] = await Promise.all([
+        api.get<Page<Issue>>(`/api/v1/validation-snapshots/${flow.snapshotId}/issues?page=${page}&size=50`),
+        api.get<{ content: { kind: string; sourceRowId: string; decision: string }[] }>(
+          `/api/v1/validation-snapshots/${flow.snapshotId}/exclusions`
+        ).catch(() => ({ content: [] })),
+      ]);
+      setIssues(res.content);
+      setHasMore(res.content.length === 50);
+      const existingDecisions: Record<string, string> = {};
+      for (const d of exclRes.content) {
+        existingDecisions[`${d.kind}:${d.sourceRowId}`] = d.decision;
+      }
+      setDecided((prev) => ({ ...prev, ...existingDecisions }));
+    } catch (e) {
+      setError(message(e));
+    }
+  }, [flow.snapshotId, page, setError]);
+
+  useEffect(() => { load(); }, [load]);
 
   const invalidRows = new Map<string, Issue[]>();
   for (const issue of issues) {
@@ -41,8 +62,10 @@ export default function Exceptions({ flow, setError }: { flow: FlowContext; setE
         <tbody>{[...invalidRows.entries()].map(([key, rowIssues]) => (
           <tr key={key}><td>{rowIssues[0].kind}</td><td>{rowIssues[0].dataRowNumber}</td>
             <td>{rowIssues.map((i) => i.code).join(', ')}</td>
-            <td>{decided[key]
+            <td>{decided[key] === 'EXCLUDE'
               ? <span className="badge ok">EXCLUDE approved</span>
+              : decided[key] === 'KEEP'
+              ? <span className="badge warn">KEEP (unresolved)</span>
               : <button onClick={() => decide(rowIssues[0].kind, rowIssues[0].sourceRowId)}>Approve exclusion</button>}</td></tr>
         ))}</tbody></table>
       <div style={{ marginTop: '1rem', display: 'flex', gap: '0.5rem', alignItems: 'center' }}>

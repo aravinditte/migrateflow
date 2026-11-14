@@ -39,7 +39,7 @@ services:
     # port private; never expose the operator workbench's known demo
     # credentials to the internet.
     ports:
-      - "127.0.0.1:8081:8081"
+      - "127.0.0.1:${BACKEND_PORT:-8081}:8081"
 
   frontend:
     build:
@@ -48,7 +48,7 @@ services:
     depends_on:
       - backend
     ports:
-      - "127.0.0.1:8080:80"
+      - "127.0.0.1:${FRONTEND_PORT:-8080}:80"
 
   # One-time public showcase bootstrap (opt-in profile, spec section 4).
   # Drives the REAL workflow over HTTP with the seeded demo actors and

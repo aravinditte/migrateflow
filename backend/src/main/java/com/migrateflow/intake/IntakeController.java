@@ -135,7 +135,10 @@ public class IntakeController {
         org.springframework.http.ContentDisposition disposition = org.springframework.http.ContentDisposition.attachment()
                 .filename(file.get("filename"), java.nio.charset.StandardCharsets.UTF_8).build();
         return ResponseEntity.ok()
-                .headers(headers -> headers.setContentDisposition(disposition))
+                .headers(headers -> {
+                    headers.setContentDisposition(disposition);
+                    headers.setCacheControl(org.springframework.http.CacheControl.noStore());
+                })
                 .contentType(MediaType.APPLICATION_OCTET_STREAM)
                 .body(new FileSystemResource(path));
     }

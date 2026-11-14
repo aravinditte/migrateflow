@@ -58,6 +58,21 @@ public class IntakeService {
             throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "STORAGE", "Upload storage unavailable");
         }
         List<Path> writtenFiles = new ArrayList<>();
+        if (org.springframework.transaction.support.TransactionSynchronizationManager.isSynchronizationActive()) {
+            final List<Path> syncFiles = writtenFiles;
+            org.springframework.transaction.support.TransactionSynchronizationManager.registerSynchronization(
+                new org.springframework.transaction.support.TransactionSynchronization() {
+                    @Override
+                    public void afterCompletion(int status) {
+                        if (status != org.springframework.transaction.support.TransactionSynchronization.STATUS_COMMITTED) {
+                            for (Path p : syncFiles) {
+                                try { Files.deleteIfExists(p); } catch (IOException ignore) {}
+                            }
+                        }
+                    }
+                }
+            );
+        }
         try {
             UUID bundleId = UUID.randomUUID();
             jdbc.update("INSERT INTO control.dataset_bundles (id, project_id, exported_at, status, uploaded_by) VALUES (?,?,?,'UPLOADED',?)",

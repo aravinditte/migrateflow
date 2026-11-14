@@ -17,7 +17,7 @@ import ShowcaseArchitecture from './ShowcaseArchitecture';
  * down or no verified scenario exists, this page says so plainly instead
  * of showing placeholder success.
  */
-export function ShowcaseView({ overview, onSignIn }: { overview: ShowcaseOverview; onSignIn: () => void }) {
+export function ShowcaseView({ overview, onSignIn }: { overview: ShowcaseOverview; onSignIn?: () => void }) {
   if (overview.setupState === 'NOT_READY' || overview.setupState === 'PREPARING') {
     return (
       <main>
@@ -31,7 +31,7 @@ export function ShowcaseView({ overview, onSignIn }: { overview: ShowcaseOvervie
           {overview.setupState === 'PREPARING' && overview.setupStep ? ` (currently at stage: ${overview.setupStep})` : ''}.
           Results appear here only after a real run has been executed and verified — nothing is pre-filled.
         </p>
-        <button className="secondary" onClick={onSignIn}>Operator sign in</button>
+        {onSignIn && <button className="secondary" onClick={onSignIn}>Operator sign in</button>}
       </main>
     );
   }
@@ -43,7 +43,7 @@ export function ShowcaseView({ overview, onSignIn }: { overview: ShowcaseOvervie
           The showcase bootstrap failed and was recorded as FAILED rather than presented as success.
           {overview.failureMessage ? ` Reason: ${overview.failureMessage}` : ''}
         </p>
-        <button className="secondary" onClick={onSignIn}>Operator sign in</button>
+        {onSignIn && <button className="secondary" onClick={onSignIn}>Operator sign in</button>}
       </main>
     );
   }
@@ -91,7 +91,7 @@ export function ShowcaseView({ overview, onSignIn }: { overview: ShowcaseOvervie
   );
 }
 
-export default function PublicShowcase({ onSignIn }: { onSignIn: () => void }) {
+export default function PublicShowcase({ onSignIn }: { onSignIn?: () => void }) {
   const load = useShowcase(() => showcaseApi.overview(), []);
 
   if (load.state === 'loading') {
@@ -110,7 +110,7 @@ export default function PublicShowcase({ onSignIn }: { onSignIn: () => void }) {
           Live evidence temporarily unavailable — the backend could not be reached, so no results are
           shown. MigrateFlow never substitutes cached or fabricated figures.
         </p>
-        <button className="secondary" onClick={onSignIn}>Operator sign in</button>
+        {onSignIn && <button className="secondary" onClick={onSignIn}>Operator sign in</button>}
       </main>
     );
   }

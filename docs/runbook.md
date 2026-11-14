@@ -49,12 +49,32 @@ only.**
 and start the Compose stack, wait for the backend health endpoint via
 the proxy, verify the SPA and a demo login, then tear everything down.
 
+## Public showcase deployment
+
+For public / demonstration environments:
+
+```bash
+# 1. Start using the public overlay: backend ports are NOT published to the host,
+# and frontend exposes port 80 only via nginx-public.conf (which forbids operator/auth/internal APIs).
+docker compose -f docker-compose.yml -f docker-compose.public.yml up --build -d
+
+# 2. Ensure all demo role accounts are disabled in production:
+python3 scripts/disable-demo-users.py "postgresql://migrateflow:migrateflow-dev-pw@127.0.0.1:5432/migrateflow"
+
+# 3. Bootstrap the showcase scenario:
+python3 scripts/bootstrap-showcase.py http://127.0.0.1:8081
+
+# 4. Verify public read model:
+python3 scripts/verify-showcase.py http://localhost:80
+```
+
 ## Failure handling
 
-- **Backend restarted mid-run** — at startup, runs left `RUNNING` by the
-  dead process are recovered automatically: their stale batch executions
-  are abandoned and the runs become `FAILED_RESTARTABLE`, ready for the
-  normal restart below. Runs left `QUEUED` are executed.
+- **Backend restarted mid-run** — at startup, `RunRecovery` automatically recovers stale executions:
+  - Spring Batch executions left running are updated to `FAILED` in the job repository;
+  - Runs left `RUNNING` or `BATCH_COMPLETED` (unverified) become `FAILED_RESTARTABLE` for safe resume via the restart ledger;
+  - Interrupted `QUEUED` runs are dispatched;
+  - In-flight `RUNNING`/`QUEUED` validation snapshots are marked `FAILED` (fail-closed; snapshots must be re-initiated).
 - **Run FAILED_RESTARTABLE** — fix the cause, then `POST /runs/{id}/restart`.
   The same run identity resumes; already-applied rows are recognised via the
   ledger and skipped. A restart never creates a second run row.

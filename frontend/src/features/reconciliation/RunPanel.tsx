@@ -17,6 +17,12 @@ export default function RunPanel({ runId, setError }: { runId: string; setError:
   const [recon, setRecon] = useState<{ status: string; summary: string; evidenceHash: string } | null>(null);
   const [restarting, setRestarting] = useState(false);
   const [restartError, setRestartError] = useState<string | null>(null);
+  useEffect(() => {
+    setRun(null);
+    setRecon(null);
+    setRestartError(null);
+  }, [runId]);
+
   const refresh = useCallback(async () => {
     if (!runId) return;
     const current = await api.get<RunView>(`/api/v1/runs/${runId}`);

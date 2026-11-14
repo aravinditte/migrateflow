@@ -36,5 +36,8 @@ class CommonTest {
         assertEquals("'+cmd", CsvEscaping.escapeCell("+cmd"));
         assertEquals("plain", CsvEscaping.escapeCell("plain"));
         assertEquals("\"a,b\"", CsvEscaping.escapeCell("a,b"));
+        assertEquals("' -2+3*[1]", CsvEscaping.escapeCell(" -2+3*[1]"));
+        assertEquals("'\t=cmd", CsvEscaping.escapeCell("\t=cmd"));
+        assertEquals("'@SUM", CsvEscaping.escapeCell("@SUM"));
     }
 }

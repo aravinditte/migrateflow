@@ -3,13 +3,29 @@ import RunPanel from '../reconciliation/RunPanel';
 import { message, SectionProps } from '../workspace/flow';
 
 export default function Cutover({ flow, patch, setError }: Omit<SectionProps, 'projectId'>) {
+  const storageKey = `migrateflow_cutover_idem_${flow.manifestId}_${flow.approvalId}`;
+  const getIdempotencyKey = () => {
+    try {
+      let key = sessionStorage.getItem(storageKey);
+      if (!key) {
+        key = crypto.randomUUID();
+        sessionStorage.setItem(storageKey, key);
+      }
+      return key;
+    } catch {
+      return crypto.randomUUID();
+    }
+  };
+
   const launch = async () => {
     setError('');
     if (!window.confirm(`Launch the final cutover for manifest ${flow.manifestId}? This writes to the simulated final target and cannot be repeated.`)) return;
+    const idempotencyKey = getIdempotencyKey();
     try {
       const result = await api.post<{ runId: string }>(`/api/v1/manifests/${flow.manifestId}/cutovers`, {
         approvalId: flow.approvalId,
-      }, { 'Idempotency-Key': crypto.randomUUID() });
+      }, { 'Idempotency-Key': idempotencyKey });
+      try { sessionStorage.removeItem(storageKey); } catch { /* ignore */ }
       patch({ cutoverRunId: result.runId });
     } catch (e) { setError(message(e)); }
   };

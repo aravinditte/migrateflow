@@ -53,9 +53,14 @@ export default function Workspace({ project, role }: { project: Project; role: s
   };
 
   useEffect(() => {
+    let cancelled = false;
+    setFlow(emptyFlow);
     api.get<FlowContext>(`/api/v1/projects/${project.id}/workflow`)
-      .then((persisted) => setFlow((prev) => ({ ...prev, ...persisted })))
+      .then((persisted) => {
+        if (!cancelled) setFlow((prev) => ({ ...prev, ...persisted }));
+      })
       .catch(() => undefined);
+    return () => { cancelled = true; };
   }, [project.id]);
 
   return (
