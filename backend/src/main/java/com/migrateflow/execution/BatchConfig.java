@@ -39,12 +39,12 @@ import java.util.UUID;
 @Configuration
 public class BatchConfig {
 
-    static final class ListReader<T> implements ItemStreamReader<T> {
+    public static class ListReader<T> implements ItemStreamReader<T> {
         private final java.util.function.Supplier<List<T>> supplier;
         private Iterator<T> iterator;
         private int readCount;
 
-        ListReader(java.util.function.Supplier<List<T>> supplier) { this.supplier = supplier; }
+        public ListReader(java.util.function.Supplier<List<T>> supplier) { this.supplier = supplier; }
 
         @Override
         public void open(ExecutionContext ctx) {
@@ -73,7 +73,7 @@ public class BatchConfig {
 
     @Bean
     @StepScope
-    public ListReader<AcceptedRows.CustomerTarget> customerReader(
+    public ItemStreamReader<AcceptedRows.CustomerTarget> customerReader(
             AcceptedRows loader,
             @Value("#{jobParameters['manifestId']}") String manifestId,
             @Value("#{jobParameters['snapshotId']}") String snapshotId) {
@@ -82,7 +82,7 @@ public class BatchConfig {
 
     @Bean
     @StepScope
-    public ListReader<AcceptedRows.OrderTarget> orderReader(
+    public ItemStreamReader<AcceptedRows.OrderTarget> orderReader(
             AcceptedRows loader,
             @Value("#{jobParameters['manifestId']}") String manifestId,
             @Value("#{jobParameters['snapshotId']}") String snapshotId) {
@@ -223,7 +223,7 @@ public class BatchConfig {
 
     @Bean
     public Step loadCustomersStep(JobRepository jobRepository, PlatformTransactionManager txManager,
-                                  ListReader<AcceptedRows.CustomerTarget> customerReader,
+                                  ItemStreamReader<AcceptedRows.CustomerTarget> customerReader,
                                   ItemWriter<AcceptedRows.CustomerTarget> customerWriter,
                                   ChunkListener faultChunkListener,
                                   StepExecutionListener runTrackingStepListener,
@@ -239,7 +239,7 @@ public class BatchConfig {
 
     @Bean
     public Step loadOrdersStep(JobRepository jobRepository, PlatformTransactionManager txManager,
-                               ListReader<AcceptedRows.OrderTarget> orderReader,
+                               ItemStreamReader<AcceptedRows.OrderTarget> orderReader,
                                ItemWriter<AcceptedRows.OrderTarget> orderWriter,
                                ChunkListener faultChunkListener,
                                StepExecutionListener runTrackingStepListener,
