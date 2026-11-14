@@ -3,6 +3,7 @@ package com.migrateflow.integration;
 import org.junit.jupiter.api.Test;
 import org.springframework.test.context.TestPropertySource;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.mock.web.MockHttpSession;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.MediaType;
 
@@ -54,7 +55,7 @@ class ShowcaseSecurityTest extends AbstractIntegrationTest {
     }
 
     @Test
-    void registerRequiresSessionAndBootstrapToken() throws Exception {
+    void registerRequiresAdminSessionAndBootstrapToken() throws Exception {
         String body = "{\"slug\":\"hinata-trading\",\"setupState\":\"PREPARING\",\"setupStep\":\"project\","
                 + "\"bootstrapVersion\":\"test\"}";
         // No session at all.
@@ -71,11 +72,51 @@ class ShowcaseSecurityTest extends AbstractIntegrationTest {
                         .header("X-Showcase-Bootstrap-Token", "wrong")
                         .contentType(MediaType.APPLICATION_JSON).content(body))
                 .andExpect(status().isForbidden());
-        // Session + token works (progress registration, not READY).
+        // A non-admin session is not a bootstrap principal, even with the token.
         mvc.perform(post("/api/v1/internal/showcase/register").session(engineer()).with(csrf())
+                        .header("X-Showcase-Bootstrap-Token", "test-bootstrap-token")
+                        .contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isForbidden());
+        // ADMIN session + token works (progress registration, not READY).
+        mvc.perform(post("/api/v1/internal/showcase/register").session(admin()).with(csrf())
                         .header("X-Showcase-Bootstrap-Token", "test-bootstrap-token")
                         .contentType(MediaType.APPLICATION_JSON).content(body))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.setupState").value("PREPARING"));
+    }
+
+    @Test
+    void detailEndpointsRequireAReadyScenario() throws Exception {
+        // A PREPARING scenario exposes only its overview state (S-15).
+        String body = "{\"slug\":\"hinata-trading\",\"setupState\":\"PREPARING\",\"setupStep\":\"intake\","
+                + "\"bootstrapVersion\":\"test\"}";
+        mvc.perform(post("/api/v1/internal/showcase/register").session(admin()).with(csrf())
+                        .header("X-Showcase-Bootstrap-Token", "test-bootstrap-token")
+                        .contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isOk());
+        mvc.perform(get("/api/v1/showcase/overview"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.setupState").value("PREPARING"));
+        mvc.perform(get("/api/v1/showcase/workflow")).andExpect(status().isServiceUnavailable());
+        mvc.perform(get("/api/v1/showcase/records")).andExpect(status().isServiceUnavailable());
+        mvc.perform(get("/api/v1/showcase/uat")).andExpect(status().isServiceUnavailable());
+        mvc.perform(get("/api/v1/showcase/evidence")).andExpect(status().isServiceUnavailable());
+    }
+
+    @Test
+    void disabledAccountSessionStopsWorking() throws Exception {
+        // Review S-20: disabling an account must cut off its live session,
+        // not just future logins.
+        MockHttpSession session = auditor();
+        mvc.perform(get("/api/v1/auth/me").session(session)).andExpect(status().isOk());
+        jdbc.update("UPDATE control.users SET enabled = FALSE WHERE email = 'auditor@example.test'");
+        try {
+            mvc.perform(get("/api/v1/auth/me").session(session))
+                    .andExpect(status().isUnauthorized());
+        } finally {
+            // Users are seeded once per context, not reset between tests:
+            // restore the flag so other test classes keep their auditor.
+            jdbc.update("UPDATE control.users SET enabled = TRUE WHERE email = 'auditor@example.test'");
+        }
     }
 }
