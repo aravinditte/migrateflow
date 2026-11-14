@@ -49,6 +49,13 @@ migrateflow:
   max-columns: 50
   batch-chunk-size: ${MIGRATEFLOW_BATCH_CHUNK_SIZE:100}
   demo-seed-enabled: ${MIGRATEFLOW_DEMO_SEED_ENABLED:false}
+  showcase:
+    # Public read-only showcase (Automated Showcase spec). The bootstrap
+    # that registers a scenario is opt-in and token-guarded; the public
+    # GET API serves whatever verified scenario the registry points to.
+    slug: ${MIGRATEFLOW_SHOWCASE_SLUG:hinata-trading}
+    bootstrap-enabled: ${MIGRATEFLOW_SHOWCASE_BOOTSTRAP_ENABLED:false}
+    bootstrap-token: ${MIGRATEFLOW_SHOWCASE_BOOTSTRAP_TOKEN:}
   # Test-only fault injection: fail a batch writer after N committed chunks.
   # Never set in a real deployment (spec section 13.2).
   test-fail-after-chunks: ${MIGRATEFLOW_TEST_FAIL_AFTER_CHUNKS:0}
