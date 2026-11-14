@@ -209,7 +209,6 @@ public class RunService {
         }
         return runId;
     }
-    }
 
     public void restart(AppUser actor, UUID runId) {
         Map<String, Object> run = runRow(runId);
