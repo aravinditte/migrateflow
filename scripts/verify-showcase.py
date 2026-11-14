@@ -93,7 +93,7 @@ def main():
     if status == 200:
         passed = [c for c in uat["cases"] if c["required"] and c["latestResult"] == "PASS"]
         check("required UAT cases passing", len(passed), 5)
-        check("approval status", uat["approvalStatus"], "APPROVE")
+        check("approval status", uat["approvalStatus"], "APPROVED")
     else:
         problems.append(f"uat returned HTTP {status}")
 
