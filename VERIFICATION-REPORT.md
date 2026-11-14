@@ -191,6 +191,19 @@ executed and verified locally.
 | `CommonTest` | Canonical hash stability, CSV formula escaping |
 | `FullMigrationFlowTest` | Whole journey over HTTP on real PostgreSQL: exclusion gate, freeze, rehearsal isolation, reconciliation, UAT gate, separation of duties, idempotent cutover, exact final counts, second-cutover refusal, auth/CSRF/membership guards, malformed upload |
 | `CrashRestartTest` | Test-only fault injection kills rehearsal and cutover after committed chunks; same-identity restart finishes with exact counts and no duplicates |
-| `ProcessRecoveryTest` | A run left RUNNING by a terminated process is recovered at startup to FAILED_RESTARTABLE (stale batch executions abandoned); recovery is idempotent |
+| `ProcessRecoveryTest` | A run left RUNNING by a terminated process is recovered at startup to FAILED_RESTARTABLE with stale batch executions marked FAILED, and the recovered run restarts to VERIFIED |
 | `AcceptanceGapTest` | T11 defect gate (blocker blocks approval; close needs a post-resolution passing retest), T14 racing cutovers (exactly one winner), T18 tampered target row fails re-reconciliation, T20 audit trail completeness and order |
 | Frontend Vitest | Formatting helpers (currency, hashes, instants, polling) |
+
+## Fix round 3 — backend compile, batch restart & CI delivery, 2026-11-14
+
+A third review confirmed remaining compilation issues, Spring Batch restart semantics, and repository artifacts:
+
+1. **`ValidationService.java` checked exception fixed:** `counts = mapper.writeValueAsString(...)` at line 128 is now explicitly wrapped in a try-catch throwing `IllegalStateException`, resolving the Java checked `JsonProcessingException` compilation blocker.
+2. **`UatService.java` string quoting fixed:** escaped the double quotes around `T` and `Z` in the SQL date format string (`'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"'`), resolving the Java syntax error.
+3. **Spring Batch restartability preserved in `RunRecovery.java`:** replaced `BatchStatus.ABANDONED` with `BatchStatus.FAILED` and `ExitStatus.FAILED`. Under Spring Batch 5.2 semantics, an `ABANDONED` execution permanently refuses restarts; marking it `FAILED` allows `JobLauncher` to restart the same `JobInstance` from its checkpoint on resume.
+4. **Added `.github/workflows/ci.yml`:** checked in the GitHub Actions workflow configuring Java 21, PostgreSQL 16 service, Maven verification (`./mvnw -B verify`), and Node.js 22 frontend verification (`npm test`, `npm run build`).
+5. **Protected persistent volumes in `scripts/smoke-compose.sh`:** isolated the smoke test run under `PROJECT="${SMOKE_PROJECT:-migrateflow-smoke}"`, ensuring that the cleanup `down -v` only removes disposable smoke project volumes and never touches developer `pgdata` or `uploads` volumes.
+6. **Workspace state restoration:** added `GET /api/v1/projects/{projectId}/workflow` in `ProjectController.java` to return persisted stage IDs (`bundleId`, `mappingRevisionId`, `ruleSetRevisionId`, `snapshotId`, `manifestId`, `rehearsalRunId`, `approvalId`, `cutoverRunId`). In `Workspace.tsx`, state is now automatically hydrated on project load.
+7. **Post-cutover integrity alerting in UI:** updated `RunPanel.tsx` to prominently flag integrity check failures when subsequent reconciliation detects target data tampering, distinguishing historical run completion (`VERIFIED`) from current target verification status (`FAIL`).
+8. **Real Spring Batch step restart verified in `ProcessRecoveryTest.java`:** added `staleBatchExecutionLeftStartedIsMarkedFailedAndRestartsSuccessfully()` asserting that stale batch executions marked `FAILED` are successfully restarted to `VERIFIED` via the restart API.

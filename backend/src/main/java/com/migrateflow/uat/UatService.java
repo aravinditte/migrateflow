@@ -77,7 +77,7 @@ public class UatService {
     public String uatEvidenceHash(UUID rehearsalRunId) {
         List<String> lines = new ArrayList<>();
         jdbc.query("SELECT c.case_key, "
-                        + "(SELECT e.result || '|' || e.executed_by || '|' || to_char(e.executed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') FROM control.uat_executions e "
+                        + "(SELECT e.result || '|' || e.executed_by || '|' || to_char(e.executed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') FROM control.uat_executions e "
                         + " WHERE e.case_id = c.id ORDER BY e.executed_at DESC, e.created_at DESC LIMIT 1) AS latest "
                         + "FROM control.uat_cases c WHERE c.rehearsal_run_id = ? ORDER BY c.case_key",
                 (rs, n) -> {

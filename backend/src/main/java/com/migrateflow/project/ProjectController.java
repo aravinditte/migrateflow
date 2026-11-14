@@ -73,6 +73,49 @@ public class ProjectController {
                 .stream().findFirst().orElseThrow(() -> ApiException.notFound("Project"));
     }
 
+    /**
+     * Workflow restoration (spec 11): returns the latest workflow stage IDs
+     * for this project so the frontend workspace state can be restored on
+     * page refresh or project reopening instead of resetting to empty.
+     */
+    @GetMapping("/{projectId}/workflow")
+    public Map<String, Object> getWorkflow(@PathVariable UUID projectId, Authentication auth) {
+        AppUser actor = SecurityConfig.requireUser(users, auth);
+        access.requireMembership(actor, projectId);
+
+        UUID bundleId = querySingleId("SELECT id FROM control.dataset_bundles WHERE project_id = ? ORDER BY created_at DESC LIMIT 1", projectId);
+        UUID mappingRevisionId = querySingleId("SELECT id FROM control.mapping_revisions WHERE project_id = ? ORDER BY revision_no DESC LIMIT 1", projectId);
+        UUID ruleSetRevisionId = querySingleId("SELECT id FROM control.rule_set_revisions WHERE project_id = ? ORDER BY revision_no DESC LIMIT 1", projectId);
+        UUID snapshotId = querySingleId("SELECT id FROM control.validation_snapshots WHERE project_id = ? ORDER BY created_at DESC LIMIT 1", projectId);
+
+        List<Map<String, Object>> manifestRows = jdbc.queryForList(
+                "SELECT id, manifest_hash FROM control.manifests WHERE project_id = ? ORDER BY (CASE WHEN status = 'FROZEN' THEN 1 ELSE 2 END), created_at DESC LIMIT 1", projectId);
+        UUID manifestId = manifestRows.isEmpty() ? null : (UUID) manifestRows.get(0).get("id");
+        String manifestHash = manifestRows.isEmpty() ? "" : (String) manifestRows.get(0).get("manifest_hash");
+
+        UUID rehearsalRunId = querySingleId("SELECT id FROM control.runs WHERE project_id = ? AND kind = 'REHEARSAL' ORDER BY created_at DESC LIMIT 1", projectId);
+        UUID approvalId = manifestId == null ? null : querySingleId(
+                "SELECT id FROM control.approvals WHERE manifest_id = ? AND decision = 'APPROVED' ORDER BY signed_at DESC LIMIT 1", manifestId);
+        UUID cutoverRunId = querySingleId("SELECT id FROM control.runs WHERE project_id = ? AND kind = 'CUTOVER' ORDER BY created_at DESC LIMIT 1", projectId);
+
+        Map<String, Object> flow = new java.util.LinkedHashMap<>();
+        flow.put("bundleId", bundleId == null ? "" : bundleId.toString());
+        flow.put("mappingRevisionId", mappingRevisionId == null ? "" : mappingRevisionId.toString());
+        flow.put("ruleSetRevisionId", ruleSetRevisionId == null ? "" : ruleSetRevisionId.toString());
+        flow.put("snapshotId", snapshotId == null ? "" : snapshotId.toString());
+        flow.put("manifestId", manifestId == null ? "" : manifestId.toString());
+        flow.put("manifestHash", manifestHash == null ? "" : manifestHash);
+        flow.put("rehearsalRunId", rehearsalRunId == null ? "" : rehearsalRunId.toString());
+        flow.put("approvalId", approvalId == null ? "" : approvalId.toString());
+        flow.put("cutoverRunId", cutoverRunId == null ? "" : cutoverRunId.toString());
+        return flow;
+    }
+
+    private UUID querySingleId(String sql, Object... args) {
+        List<UUID> list = jdbc.query(sql, (rs, n) -> rs.getObject(1, UUID.class), args);
+        return list.isEmpty() ? null : list.get(0);
+    }
+
     @PostMapping("/{projectId}/archive")
     public Map<String, Object> archive(@PathVariable UUID projectId, Authentication auth) {
         AppUser actor = SecurityConfig.requireUser(users, auth);

@@ -1,4 +1,5 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { api } from '../../lib/api';
 import Audit from '../audit/Audit';
 import Approval from '../cutover/Approval';
 import Cutover from '../cutover/Cutover';
@@ -20,6 +21,12 @@ export default function Workspace({ project, role }: { project: Project; role: s
   const [flow, setFlow] = useState<FlowContext>(emptyFlow);
   const [error, setError] = useState('');
   const patch = (p: Partial<FlowContext>) => setFlow((f) => ({ ...f, ...p }));
+
+  useEffect(() => {
+    api.get<FlowContext>(`/api/v1/projects/${project.id}/workflow`)
+      .then((persisted) => setFlow((prev) => ({ ...prev, ...persisted })))
+      .catch(() => undefined);
+  }, [project.id]);
 
   return (
     <div>

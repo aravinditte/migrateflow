@@ -3,6 +3,7 @@ package com.migrateflow.execution;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.batch.core.BatchStatus;
+import org.springframework.batch.core.ExitStatus;
 import org.springframework.batch.core.JobExecution;
 import org.springframework.batch.core.explore.JobExplorer;
 import org.springframework.batch.core.repository.JobRepository;
@@ -20,8 +21,9 @@ import java.util.UUID;
  * Startup recovery for process termination (spec 9): MigrateFlow runs as a
  * single instance, so at startup any run still marked RUNNING belongs to a
  * process that no longer exists. Its stale Spring Batch executions are
- * abandoned in the job repository (otherwise the batch layer would refuse a
- * restart as "already running"), and the run is marked FAILED_RESTARTABLE
+ * marked FAILED in the job repository (so Spring Batch allows the same
+ * JobInstance to be restarted from the last committed checkpoint, whereas
+ * ABANDONED would refuse restart), and the run is marked FAILED_RESTARTABLE
  * so the ordinary same-identity restart path resumes it - the applied-rows
  * ledger makes the resumed execution exact. Runs still QUEUED (the JVM
  * died between the launch insert and the executor picking the task up) are
@@ -58,7 +60,7 @@ public class RunRecovery implements ApplicationRunner {
         for (Map<String, Object> run : jdbc.queryForList(
                 "SELECT id FROM control.runs WHERE status = 'RUNNING'")) {
             UUID runId = (UUID) run.get("id");
-            abandonStaleExecutions(runId);
+            failStaleExecutions(runId);
             int updated = jdbc.update(
                     "UPDATE control.runs SET status = 'FAILED_RESTARTABLE', finished_at = now(), "
                             + "error_message = 'Recovered at startup: the previous process terminated during execution' "
@@ -78,21 +80,23 @@ public class RunRecovery implements ApplicationRunner {
         return recovered;
     }
 
-    private void abandonStaleExecutions(UUID runId) {
+    private void failStaleExecutions(UUID runId) {
         for (String jobName : JOB_NAMES) {
             for (JobExecution execution : jobExplorer.findRunningJobExecutions(jobName)) {
                 if (!runId.toString().equals(execution.getJobParameters().getString("runId"))) {
                     continue;
                 }
                 execution.getStepExecutions().forEach(step -> {
-                    step.setStatus(BatchStatus.ABANDONED);
+                    step.setStatus(BatchStatus.FAILED);
+                    step.setExitStatus(ExitStatus.FAILED);
                     step.setEndTime(LocalDateTime.now());
                     jobRepository.update(step);
                 });
-                execution.setStatus(BatchStatus.ABANDONED);
+                execution.setStatus(BatchStatus.FAILED);
+                execution.setExitStatus(ExitStatus.FAILED);
                 execution.setEndTime(LocalDateTime.now());
                 jobRepository.update(execution);
-                log.warn("Abandoned stale batch execution {} for run {}", execution.getId(), runId);
+                log.warn("Marked stale batch execution {} as FAILED for run {} to enable safe restart", execution.getId(), runId);
             }
         }
     }

@@ -561,6 +561,7 @@ Base path: `/api/v1`. All business endpoints require a valid session and relevan
 | `POST` | `/projects` | ENGINEER | Create project |
 | `GET` | `/projects` | Member | Paginated accessible projects |
 | `GET` | `/projects/{projectId}` | Member | Project summary |
+| `GET` | `/projects/{projectId}/workflow` | Member | Active workflow stage IDs (bundle, mapping, snapshot, manifest, runs) for workspace hydration |
 | `POST` | `/projects/{projectId}/archive` | ENGINEER | Archive if no active work |
 | `POST` | `/projects/{projectId}/bundles` | ENGINEER | Multipart customers+orders; `201` bundle metadata |
 | `GET` | `/bundles/{bundleId}/profile` | Member | Dataset profiles/row counts |

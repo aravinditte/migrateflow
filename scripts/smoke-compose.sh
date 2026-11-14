@@ -6,15 +6,23 @@
 # clean). Requires Docker; exits non-zero on the first failed check.
 #
 # Usage: scripts/smoke-compose.sh
+# Runs under an isolated Docker Compose project (default: migrateflow-smoke)
+# so the disposable run never destroys existing developer volumes (pgdata/uploads).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+PROJECT="${SMOKE_PROJECT:-migrateflow-smoke}"
 BASE="http://localhost:8080"
-COMPOSE="docker compose"
+COMPOSE="docker compose -p $PROJECT"
+CLEANUP_VOLUMES="${SMOKE_CLEANUP_VOLUMES:-true}"
 
 cleanup() {
-  echo "== tearing down =="
-  $COMPOSE down -v >/dev/null 2>&1 || true
+  echo "== tearing down smoke test project ($PROJECT) =="
+  if [ "$CLEANUP_VOLUMES" = "true" ]; then
+    $COMPOSE down -v >/dev/null 2>&1 || true
+  else
+    $COMPOSE down >/dev/null 2>&1 || true
+  fi
 }
 trap cleanup EXIT
 

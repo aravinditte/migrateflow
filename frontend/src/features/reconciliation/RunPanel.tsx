@@ -30,10 +30,16 @@ export default function RunPanel({ runId, setError }: { runId: string; setError:
   }, [refresh, setError]);
   if (!runId) return null;
   const summary = recon?.summary ? (JSON.parse(recon.summary) as ReconSummary) : null;
+  const isPostCutoverTampered = run?.status === 'VERIFIED' && recon?.status === 'FAIL';
   return (
     <div>
+      {isPostCutoverTampered && (
+        <div className="error" style={{ marginBottom: '1rem' }}>
+          <b>Integrity Alert:</b> Post-cutover target data modification detected! While the cutover run initially completed as <b>VERIFIED</b>, subsequent independent reconciliation has <b>FAILED</b>. Review differences below.
+        </div>
+      )}
       {run && (
-        <p>Status <span className={`badge ${run.status === 'VERIFIED' ? 'ok' : run.status.includes('FAILED') ? 'bad' : ''}`}>{run.status}</span>
+        <p>Run Status <span className={`badge ${run.status === 'VERIFIED' ? 'ok' : run.status.includes('FAILED') ? 'bad' : ''}`}>{run.status}</span>
           {' '}· processed {run.processedRows}/{run.expectedAcceptedRows}
           {run.currentStep ? ` · step ${run.currentStep}` : ''}
           {run.errorMessage ? <span className="muted"> · {run.errorMessage}</span> : ''}</p>

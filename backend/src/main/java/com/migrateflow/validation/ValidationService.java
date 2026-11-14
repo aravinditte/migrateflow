@@ -125,9 +125,14 @@ public class ValidationService {
         }
         long validCustomers = outcome.customers().stream().filter(ValidationEngine.ValidatedCustomer::valid).count();
         long validOrders = outcome.orders().stream().filter(ValidationEngine.ValidatedOrder::valid).count();
-        String counts = mapper.writeValueAsString(Map.of(
-                "customers", Map.of("raw", customerRows.size(), "valid", validCustomers, "invalid", customerRows.size() - validCustomers),
-                "orders", Map.of("raw", orderRows.size(), "valid", validOrders, "invalid", orderRows.size() - validOrders)));
+        String counts;
+        try {
+            counts = mapper.writeValueAsString(Map.of(
+                    "customers", Map.of("raw", customerRows.size(), "valid", validCustomers, "invalid", customerRows.size() - validCustomers),
+                    "orders", Map.of("raw", orderRows.size(), "valid", validOrders, "invalid", orderRows.size() - validOrders)));
+        } catch (JsonProcessingException e) {
+            throw new IllegalStateException("Failed to serialize source counts", e);
+        }
         jdbc.update("UPDATE control.validation_snapshots SET status = 'COMPLETED', source_counts_json = ?::jsonb, validated_at = now() WHERE id = ?",
                 counts, snapshotId);
     }
