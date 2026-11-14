@@ -26,8 +26,8 @@ export default function ShowcaseHero({ overview, onSignIn }: { overview: Showcas
         <span className="badge">Real backend execution</span>
         <span className="badge">Automated demonstration actors</span>
         <span className="badge">{overview.backend.connected ? '● Backend connected' : '● Backend unreachable'}</span>
-        {overview.verification?.verifiedAt && (
-          <span className="badge">Verified {formatInstant(overview.verification.verifiedAt)}</span>
+        {overview.verification?.cutoverReconciliationCompletedAt && (
+          <span className="badge">Cutover verified {formatInstant(overview.verification.cutoverReconciliationCompletedAt)}</span>
         )}
       </div>
       <p className="muted">
