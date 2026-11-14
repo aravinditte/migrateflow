@@ -103,3 +103,10 @@ verified, the registry simply needs the final READY registration — the
 script detects the existing runs. Starting over requires a **fresh
 database**; there is deliberately no in-place reset for a consumed
 cutover slot.
+
+**Public hosting hardening.** Compose binds the backend (8081) and
+frontend (8080) to 127.0.0.1. For a public deployment, terminate TLS in
+a reverse proxy in front of the frontend only, keep the backend port
+private, and replace the seeded demo passwords (or disable the demo
+seed and provision real operator accounts) — the public read-only page
+must never share a public host with a known-credential workbench.
