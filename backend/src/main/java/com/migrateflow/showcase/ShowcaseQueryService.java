@@ -36,12 +36,22 @@ public class ShowcaseQueryService {
     private final ObjectMapper mapper = new ObjectMapper();
     private final String slug;
 
+    public static final String SYNTHETIC_CUSTOMERS_SHA256 = "696c90e871d5c67b70ee8cdd1abd0175b37bb442a59bf31f1aea55782c8067cd";
+    public static final String SYNTHETIC_ORDERS_SHA256 = "133c1ea3262e19369a2b2db29c24899fed1da2c74a36f50bc2547639dc7a441d";
+
     public ShowcaseQueryService(JdbcTemplate jdbc, ShowcaseRegistryService registry, UatService uat,
                                 @Value("${migrateflow.showcase.slug:hinata-trading}") String slug) {
         this.jdbc = jdbc;
         this.registry = registry;
         this.uat = uat;
         this.slug = slug;
+    }
+
+    public static String maskEmail(String email) {
+        if (email == null || email.isBlank()) return "";
+        int at = email.indexOf('@');
+        if (at <= 0) return "***";
+        return email.charAt(0) + "***" + email.substring(at);
     }
 
     public String slug() { return slug; }
@@ -114,8 +124,9 @@ public class ShowcaseQueryService {
                         orders.path("writtenAmountYen").asLong(0));
             }
         }
-        String manifestHash = s.manifestId() == null ? null : jdbc.queryForObject(
-                "SELECT manifest_hash FROM control.manifests WHERE id = ?", String.class, s.manifestId());
+        String manifestHash = s.manifestId() == null ? null : jdbc.query(
+                "SELECT manifest_hash FROM control.manifests WHERE id = ?",
+                rs -> rs.next() ? rs.getString(1) : null, s.manifestId());
         ShowcaseDto.Verification verification = new ShowcaseDto.Verification(
                 s.verifiedAt(), cutoverReportCompletedAt, s.createdAt(),
                 manifestHash == null ? null : manifestHash.trim().substring(0, Math.min(12, manifestHash.trim().length())),
@@ -129,14 +140,20 @@ public class ShowcaseQueryService {
 
     private ShowcaseDto.RunRef runRef(UUID runId) {
         if (runId == null) return null;
-        String status = jdbc.queryForObject("SELECT status FROM control.runs WHERE id = ?", String.class, runId);
+        List<String> statuses = jdbc.queryForList("SELECT status FROM control.runs WHERE id = ?", String.class, runId);
+        String status = statuses.isEmpty() ? null : statuses.get(0);
         Map<String, Object> report = latestReport(runId);
         return new ShowcaseDto.RunRef(status, report == null ? null : (String) report.get("status"));
     }
 
     private ShowcaseDto.ValidationCounts snapshotCounts(UUID snapshotId) {
-        String json = jdbc.queryForObject(
+        if (snapshotId == null) return new ShowcaseDto.ValidationCounts(0, 0, 0, 0, 0, 0);
+        List<String> list = jdbc.queryForList(
                 "SELECT source_counts_json::text FROM control.validation_snapshots WHERE id = ?", String.class, snapshotId);
+        if (list.isEmpty()) {
+            return new ShowcaseDto.ValidationCounts(0, 0, 0, 0, 0, 0);
+        }
+        String json = list.get(0);
         try {
             JsonNode root = mapper.readTree(json);
             return new ShowcaseDto.ValidationCounts(
@@ -181,16 +198,18 @@ public class ShowcaseQueryService {
                 s.mappingRevisionId() == null ? null : tsField("SELECT created_at FROM control.mapping_revisions WHERE id = ?", s.mappingRevisionId()),
                 Map.of("mappingRevisionId", str(s.mappingRevisionId()), "ruleSetRevisionId", str(s.ruleSetRevisionId()))));
 
-        String snapshotStatus = s.snapshotId() == null ? null : jdbc.queryForObject(
+        List<String> snapshotStatuses = s.snapshotId() == null ? List.of() : jdbc.queryForList(
                 "SELECT status FROM control.validation_snapshots WHERE id = ?", String.class, s.snapshotId());
+        String snapshotStatus = snapshotStatuses.isEmpty() ? null : snapshotStatuses.get(0);
         stages.add(stage("validation", "Validation snapshot",
                 "COMPLETED".equals(snapshotStatus) ? "COMPLETED" : "FAILED".equals(snapshotStatus) ? "FAILED" : s.snapshotId() == null ? "PENDING" : "IN_PROGRESS",
                 s.snapshotId() == null ? null : tsField("SELECT validated_at FROM control.validation_snapshots WHERE id = ?", s.snapshotId()),
                 Map.of("snapshotId", str(s.snapshotId()), "status", str(snapshotStatus))));
 
-        long excluded = s.snapshotId() == null ? 0 : jdbc.queryForObject(
+        Long excludedCount = s.snapshotId() == null ? 0L : jdbc.queryForObject(
                 "SELECT count(DISTINCT (kind, source_row_id)) FROM control.exclusion_decisions WHERE snapshot_id = ? AND decision = 'EXCLUDE'",
                 Long.class, s.snapshotId());
+        long excluded = excludedCount == null ? 0L : excludedCount;
         long invalidTotal = 0;
         if (s.snapshotId() != null) {
             ShowcaseDto.ValidationCounts c = snapshotCounts(s.snapshotId());
@@ -201,8 +220,9 @@ public class ShowcaseQueryService {
                 s.snapshotId() == null ? null : tsField("SELECT max(decided_at) FROM control.exclusion_decisions WHERE snapshot_id = ?", s.snapshotId()),
                 Map.of("excludedRows", String.valueOf(excluded), "invalidRows", String.valueOf(invalidTotal))));
 
-        String manifestHash = s.manifestId() == null ? null : jdbc.queryForObject(
-                "SELECT manifest_hash FROM control.manifests WHERE id = ?", String.class, s.manifestId());
+        String manifestHash = s.manifestId() == null ? null : jdbc.query(
+                "SELECT manifest_hash FROM control.manifests WHERE id = ?",
+                rs -> rs.next() ? rs.getString(1) : null, s.manifestId());
         stages.add(stage("freeze", "Manifest frozen", s.manifestId() != null ? "COMPLETED" : "PENDING",
                 s.manifestId() == null ? null : tsField("SELECT created_at FROM control.manifests WHERE id = ?", s.manifestId()),
                 Map.of("manifestId", str(s.manifestId()), "manifestFingerprint",
@@ -217,8 +237,9 @@ public class ShowcaseQueryService {
                         "evidenceHash", rehearsalReport == null ? "" : str(rehearsalReport.get("evidence_hash")).trim())));
 
         stages.add(uatStage(s));
-        Map<String, Object> approval = s.approvalId() == null ? null : jdbc.queryForMap(
+        List<Map<String, Object>> approvalRows = s.approvalId() == null ? List.of() : jdbc.queryForList(
                 "SELECT decision, created_at FROM control.approvals WHERE id = ?", s.approvalId());
+        Map<String, Object> approval = approvalRows.isEmpty() ? null : approvalRows.get(0);
         stages.add(stage("approval", "Reviewer approval (automated demo actor)",
                 approval == null ? "PENDING" : "APPROVED".equals(approval.get("decision")) ? "COMPLETED" : "FAILED",
                 approval == null ? null : ts((Timestamp) approval.get("created_at")),
@@ -230,8 +251,10 @@ public class ShowcaseQueryService {
 
     private ShowcaseDto.Stage runStage(String key, String title, UUID runId) {
         if (runId == null) return stage(key, title, "PENDING", null, Map.of());
-        Map<String, Object> run = jdbc.queryForMap(
+        List<Map<String, Object>> runRows = jdbc.queryForList(
                 "SELECT status, finished_at, current_step, processed_rows FROM control.runs WHERE id = ?", runId);
+        if (runRows.isEmpty()) return stage(key, title, "FAILED", null, Map.of("error", "Run not found"));
+        Map<String, Object> run = runRows.get(0);
         String status = (String) run.get("status");
         String mapped = switch (status) {
             case "VERIFIED" -> "COMPLETED";
@@ -377,6 +400,24 @@ public class ShowcaseQueryService {
     public ShowcaseDto.RecordPage records(String kind, int page, int size) {
         Scenario s = readyScenario();
         if (s.cutoverRunId() == null) return new ShowcaseDto.RecordPage(List.of(), page, size);
+        if (!slug.equals(s.slug())) {
+            throw new ApiException(HttpStatus.FORBIDDEN, "SHOWCASE_PROJECT_MISMATCH",
+                    "Public records are restricted to the designated showcase scenario");
+        }
+        List<Map<String, Object>> bundleFiles = jdbc.queryForList(
+                "SELECT kind, sha256 FROM control.source_files WHERE bundle_id = ?", s.bundleId());
+        for (Map<String, Object> f : bundleFiles) {
+            String k = (String) f.get("kind");
+            String sha = (String) f.get("sha256");
+            if ("CUSTOMERS".equals(k) && !SYNTHETIC_CUSTOMERS_SHA256.equalsIgnoreCase(sha)) {
+                throw new ApiException(HttpStatus.FORBIDDEN, "NON_SHOWCASE_DATASET",
+                        "Source dataset does not match the synthetic showcase fixture");
+            }
+            if ("ORDERS".equals(k) && !SYNTHETIC_ORDERS_SHA256.equalsIgnoreCase(sha)) {
+                throw new ApiException(HttpStatus.FORBIDDEN, "NON_SHOWCASE_DATASET",
+                        "Source dataset does not match the synthetic showcase fixture");
+            }
+        }
         boolean customers = !"orders".equals(kind);
         String table = customers ? "target.customers" : "target.orders";
         String stageTable = customers ? "stage.customer_input_rows" : "stage.order_input_rows";
@@ -406,7 +447,13 @@ public class ShowcaseQueryService {
                                 : List.of("Order_No", "Cust_No", "Order_Dt", "Amount_JPY", "State");
                         Map<String, String> filtered = new LinkedHashMap<>();
                         for (String key : allowed) {
-                            if (parsed.containsKey(key)) filtered.put(key, parsed.get(key));
+                            if (parsed.containsKey(key)) {
+                                String val = parsed.get(key);
+                                if ("Email".equalsIgnoreCase(key)) {
+                                    val = maskEmail(val);
+                                }
+                                filtered.put(key, val);
+                            }
                         }
                         source = filtered;
                     } catch (Exception e) {
@@ -416,7 +463,7 @@ public class ShowcaseQueryService {
                     if (customers) {
                         target.put("externalCustomerId", rs.getString("ext_id"));
                         target.put("fullName", rs.getString("full_name"));
-                        target.put("email", rs.getString("email") == null ? "" : rs.getString("email"));
+                        target.put("email", maskEmail(rs.getString("email")));
                         target.put("joinedOn", rs.getDate("joined_on") == null ? "" : rs.getDate("joined_on").toString());
                     } else {
                         target.put("externalOrderId", rs.getString("ext_id"));
@@ -487,13 +534,39 @@ public class ShowcaseQueryService {
         if (cutoverReport == null || !"PASS".equals(cutoverReport.get("status"))) {
             problems.add("latest cutover reconciliation report is not PASS");
         }
-        if (rehearsalReport != null) {
-            Map<String, Object> approval = jdbc.queryForMap(
-                    "SELECT manifest_id, rehearsal_run_id, reconciliation_report_id, uat_evidence_hash FROM control.approvals WHERE id = ?",
-                    s.approvalId());
+        List<Map<String, Object>> bundleFiles = jdbc.queryForList(
+                "SELECT kind, sha256 FROM control.source_files WHERE bundle_id = ?", s.bundleId());
+        if (bundleFiles.isEmpty()) {
+            problems.add("no source files found for bundle " + s.bundleId());
+        }
+        for (Map<String, Object> f : bundleFiles) {
+            String kind = (String) f.get("kind");
+            String sha = (String) f.get("sha256");
+            if ("CUSTOMERS".equals(kind) && !SYNTHETIC_CUSTOMERS_SHA256.equalsIgnoreCase(sha)) {
+                problems.add("customers source file hash does not match synthetic showcase fixture");
+            }
+            if ("ORDERS".equals(kind) && !SYNTHETIC_ORDERS_SHA256.equalsIgnoreCase(sha)) {
+                problems.add("orders source file hash does not match synthetic showcase fixture");
+            }
+        }
+
+        List<Map<String, Object>> approvals = jdbc.queryForList(
+                "SELECT manifest_id, rehearsal_run_id, reconciliation_report_id, uat_evidence_hash, decision, reviewer_id FROM control.approvals WHERE id = ?",
+                s.approvalId());
+        if (approvals.isEmpty()) {
+            problems.add("approval record not found for id " + s.approvalId());
+        } else {
+            Map<String, Object> approval = approvals.get(0);
+            String decision = (String) approval.get("decision");
+            if (!"APPROVED".equals(decision)) {
+                problems.add("approval decision is not APPROVED (was: " + decision + ")");
+            }
+            if (approval.get("reviewer_id") == null) {
+                problems.add("approval missing reviewer attribution");
+            }
             if (!s.manifestId().equals(approval.get("manifest_id"))
                     || !s.rehearsalRunId().equals(approval.get("rehearsal_run_id"))
-                    || !rehearsalReport.get("id").equals(approval.get("reconciliation_report_id"))) {
+                    || (rehearsalReport != null && !rehearsalReport.get("id").equals(approval.get("reconciliation_report_id")))) {
                 problems.add("approval does not bind this manifest, rehearsal and reconciliation report");
             }
             String approvedHash = approval.get("uat_evidence_hash") == null ? ""

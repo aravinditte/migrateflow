@@ -103,9 +103,9 @@ public class RunController {
                                                   @RequestParam(defaultValue = "50") int size, Authentication auth) {
         AppUser actor = SecurityConfig.requireUser(users, auth);
         access.requireMembership(actor, access.projectOfRun(runId));
-        int validPage = PageRequestUtil.validatePage(page);
-        int validSize = PageRequestUtil.validateSize(size);
-        int offset = PageRequestUtil.safeOffset(validPage, validSize);
+        int validPage = PageRequestUtil.clampPage(page);
+        int validSize = PageRequestUtil.clampSize(size);
+        long offset = PageRequestUtil.safeOffset(validPage, validSize);
         String sql = "SELECT id, external_customer_id, full_name, email, joined_on, source_row_number "
                 + "FROM rehearsal.customers WHERE rehearsal_run_id = ?"
                 + (q == null || q.isBlank() ? "" : " AND external_customer_id LIKE ?")
@@ -132,9 +132,9 @@ public class RunController {
                                                @RequestParam(defaultValue = "50") int size, Authentication auth) {
         AppUser actor = SecurityConfig.requireUser(users, auth);
         access.requireMembership(actor, access.projectOfRun(runId));
-        int validPage = PageRequestUtil.validatePage(page);
-        int validSize = PageRequestUtil.validateSize(size);
-        int offset = PageRequestUtil.safeOffset(validPage, validSize);
+        int validPage = PageRequestUtil.clampPage(page);
+        int validSize = PageRequestUtil.clampSize(size);
+        long offset = PageRequestUtil.safeOffset(validPage, validSize);
         String sql = "SELECT o.id, o.external_order_id, c.external_customer_id, o.order_date, o.amount_yen, o.status, o.source_row_number "
                 + "FROM rehearsal.orders o JOIN rehearsal.customers c "
                 + "ON c.rehearsal_run_id = o.rehearsal_run_id AND c.id = o.customer_id WHERE o.rehearsal_run_id = ?"

@@ -35,6 +35,12 @@ public class DemoSeedRunner implements ApplicationRunner {
     @Override
     public void run(ApplicationArguments args) {
         if (!enabled || users.count() > 0) return;
+        boolean isPublicOrProd = env.matchesProfiles("production", "prod", "public")
+                || "production".equalsIgnoreCase(env.getProperty("MIGRATEFLOW_ENV"))
+                || "public".equalsIgnoreCase(env.getProperty("MIGRATEFLOW_ENV"));
+        if (isPublicOrProd) {
+            throw new IllegalStateException("FATAL: MIGRATEFLOW_DEMO_SEED_ENABLED must not be enabled under production/public profiles.");
+        }
         seed("engineer@example.test", "MIGRATEFLOW_ENGINEER_PASSWORD", "engineer-dev-pw", "Demo Engineer", "ENGINEER");
         seed("reviewer@example.test", "MIGRATEFLOW_REVIEWER_PASSWORD", "reviewer-dev-pw", "Demo Reviewer", "REVIEWER");
         seed("auditor@example.test", "MIGRATEFLOW_AUDITOR_PASSWORD", "auditor-dev-pw", "Demo Auditor", "AUDITOR");

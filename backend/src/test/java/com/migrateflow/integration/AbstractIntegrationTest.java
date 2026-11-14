@@ -116,8 +116,8 @@ public abstract class AbstractIntegrationTest {
         byte[] customers = Files.readAllBytes(Path.of("..", "fixtures", "customers_1000.csv"));
         byte[] orders = Files.readAllBytes(Path.of("..", "fixtures", "orders_2000.csv"));
         MvcResult result = mvc.perform(multipart("/api/v1/projects/" + projectId + "/bundles")
-                        .file(new MockMultipartFile("customers", "customers.csv", "text/csv", customers))
-                        .file(new MockMultipartFile("orders", "orders.csv", "text/csv", orders))
+                        .file(new MockMultipartFile("customers", "customers_1000.csv", "text/csv", customers))
+                        .file(new MockMultipartFile("orders", "orders_2000.csv", "text/csv", orders))
                         .param("exportedAt", "2025-03-01T00:00:00Z")
                         .session(session).with(csrf()))
                 .andExpect(status().isCreated())

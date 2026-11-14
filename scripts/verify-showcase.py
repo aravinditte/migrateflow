@@ -88,21 +88,42 @@ def main():
             check(f"reconciliation[{scope}] status", report["status"], "PASS")
             check(f"reconciliation[{scope}] differences",
                   report["summary"]["differences"], [])
+            ev_hash = report.get("evidenceHash", "")
+            if len(ev_hash) != 64:
+                problems.append(f"reconciliation[{scope}] evidenceHash is not 64-char SHA256 (was {ev_hash!r})")
+            else:
+                print(f"  ok reconciliation[{scope}] evidenceHash: {ev_hash[:12]}...")
 
     status, uat = get("/api/v1/showcase/uat")
     if status == 200:
         passed = [c for c in uat["cases"] if c["required"] and c["latestResult"] == "PASS"]
         check("required UAT cases passing", len(passed), 5)
         check("approval status", uat["approvalStatus"], "APPROVED")
+        check("approval role", uat.get("approvedByRole"), "REVIEWER")
     else:
         problems.append(f"uat returned HTTP {status}")
 
-    status, records = get("/api/v1/showcase/records?kind=customers&size=5")
-    if status != 200 or not records["content"]:
-        problems.append(f"records sample missing (HTTP {status})")
-    else:
-        row = records["content"][0]
-        print(f"  ok records sample: {row['externalId']} from {row['sourceFile']} row {row['sourceRowNumber']}")
+    # Records: verify customers and orders sample, provenance, masking, pagination
+    for kind in ("customers", "orders"):
+        status, records = get(f"/api/v1/showcase/records?kind={kind}&size=5&page=0")
+        if status != 200 or not records.get("content"):
+            problems.append(f"records[{kind}] sample missing (HTTP {status})")
+        else:
+            row = records["content"][0]
+            print(f"  ok records[{kind}] sample: {row['externalId']} from {row['sourceFile']} row {row['sourceRowNumber']}")
+            if kind == "customers":
+                email = row.get("target", {}).get("email", "")
+                if "@" in email and "***" not in email:
+                    problems.append(f"customer target email was not masked: {email}")
+                src_email = row.get("source", {}).get("Email", "")
+                if "@" in src_email and "***" not in src_email:
+                    problems.append(f"customer source email was not masked: {src_email}")
+            # Verify pagination advances to next page
+            status2, records2 = get(f"/api/v1/showcase/records?kind={kind}&size=5&page=1")
+            if status2 == 200 and records2.get("content"):
+                row2 = records2["content"][0]
+                if row2["externalId"] == row["externalId"]:
+                    problems.append(f"records[{kind}] page 1 returned identical first ID to page 0")
 
     status, issues = get("/api/v1/showcase/validation?size=50")
     if status != 200:
@@ -112,6 +133,17 @@ def main():
         rows = {(i["kind"], i["dataRowNumber"]) for i in decided}
         check("distinct excluded rows listed", len(rows),
               expected["customers"]["excludedRows"] + expected["orders"]["excludedRows"])
+
+    # Full evidence bundle check
+    status, evidence = get("/api/v1/showcase/evidence")
+    if status != 200 or not isinstance(evidence, dict):
+        problems.append(f"evidence bundle returned HTTP {status}")
+    else:
+        check("evidence dataClassification", evidence.get("dataClassification"), "SYNTHETIC")
+        if not evidence.get("overview") or not evidence.get("workflow"):
+            problems.append("evidence bundle missing nested overview/workflow")
+        else:
+            print("  ok evidence JSON bundle complete and verified")
 
     if problems:
         print("\nSHOWCASE VERIFICATION FAILED:")

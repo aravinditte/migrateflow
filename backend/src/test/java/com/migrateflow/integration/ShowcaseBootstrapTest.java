@@ -115,7 +115,25 @@ class ShowcaseBootstrapTest extends AbstractIntegrationTest {
         mvc.perform(get("/api/v1/showcase/records?kind=customers&size=3"))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.content.length()").value(3))
-                .andExpect(jsonPath("$.content[0].sourceFile").value("customers_1000.csv"));
+                .andExpect(jsonPath("$.content[0].sourceFile").value("customers_1000.csv"))
+                .andExpect(jsonPath("$.content[0].source.Email").value(org.hamcrest.Matchers.containsString("***")))
+                .andExpect(jsonPath("$.content[0].target.email").value(org.hamcrest.Matchers.containsString("***")));
+
+        // MF-008: Alter approval decision to REJECTED -> overview becomes STALE/INTEGRITY_ALERT and details fail closed
+        jdbc.update("UPDATE control.approvals SET decision = 'REJECTED' WHERE id = ?", approvalId);
+        mvc.perform(get("/api/v1/showcase/overview"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.setupState").value("STALE"))
+                .andExpect(jsonPath("$.integrity").value("INTEGRITY_ALERT"));
+        mvc.perform(get("/api/v1/showcase/records?kind=customers")).andExpect(status().isServiceUnavailable());
+        mvc.perform(get("/api/v1/showcase/workflow")).andExpect(status().isServiceUnavailable());
+
+        // Restore approval decision to APPROVED -> overview recovers to READY
+        jdbc.update("UPDATE control.approvals SET decision = 'APPROVED' WHERE id = ?", approvalId);
+        mvc.perform(get("/api/v1/showcase/overview"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.setupState").value("READY"))
+                .andExpect(jsonPath("$.integrity").value("OK"));
 
         // Idempotent re-registration: no new rows anywhere.
         register(body, 200);

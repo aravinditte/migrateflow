@@ -54,9 +54,9 @@ public class ProjectController {
     public Map<String, Object> list(@RequestParam(defaultValue = "0") int page,
                                     @RequestParam(defaultValue = "20") int size, Authentication auth) {
         AppUser actor = SecurityConfig.requireUser(users, auth);
-        int validPage = PageRequestUtil.validatePage(page);
-        int validSize = PageRequestUtil.validateSize(size);
-        int offset = PageRequestUtil.safeOffset(validPage, validSize);
+        int validPage = PageRequestUtil.clampPage(page);
+        int validSize = PageRequestUtil.clampSize(size);
+        long offset = PageRequestUtil.safeOffset(validPage, validSize);
         List<Map<String, Object>> rows;
         if (actor.isAdmin()) {
             rows = jdbc.query("SELECT * FROM control.projects ORDER BY created_at DESC LIMIT ? OFFSET ?",
@@ -179,9 +179,9 @@ public class ProjectController {
                                            @RequestParam(defaultValue = "50") int size, Authentication auth) {
         AppUser actor = SecurityConfig.requireUser(users, auth);
         access.requireMembership(actor, projectId);
-        int validPage = PageRequestUtil.validatePage(page);
-        int validSize = PageRequestUtil.validateSize(size);
-        int offset = PageRequestUtil.safeOffset(validPage, validSize);
+        int validPage = PageRequestUtil.clampPage(page);
+        int validSize = PageRequestUtil.clampSize(size);
+        long offset = PageRequestUtil.safeOffset(validPage, validSize);
         List<Map<String, Object>> rows = jdbc.query(
                 "SELECT a.*, u.email AS actor_email FROM control.audit_events a LEFT JOIN control.users u ON u.id = a.actor_id "
                         + "WHERE a.project_id = ? ORDER BY a.occurred_at DESC LIMIT ? OFFSET ?",

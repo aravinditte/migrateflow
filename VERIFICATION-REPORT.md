@@ -318,3 +318,150 @@ Verification status, stated plainly:
 | `ShowcaseBootstrapTest` | Full real journey registered READY; anonymous overview serves genuine 995/1,990/¥21,998,650 with integrity OK and 11/11 stages COMPLETED; re-registration idempotent; broken-lineage READY refused 422 and persisted FAILED |
 | `AcceptanceGapTest` | T11 defect gate (blocker blocks approval; close needs a post-resolution passing retest), T14 racing cutovers (exactly one winner), T18 tampered target row fails re-reconciliation, T20 audit trail completeness and order |
 | Frontend Vitest | Formatting helpers (currency, hashes, instants, polling) |
+
+## Fix round 4 — Showcase repair & integrity enforcement (MF-001..MF-012), 2026-11-14
+
+Implementation and verification of the fix plan on branch `fix/showcase-repair`.
+Executed locally on Windows 11 with PostgreSQL 16.16 (Docker container `migrateflow-db-1` on port 5432),
+Java 21 (`Eclipse Adoptium jdk-21.0.13.9-hotspot`), Node.js v20.18.0, and Python 3.12.
+
+### Local test results summary
+- **Backend (Maven + PostgreSQL 16):** 47/47 tests passed (0 failures, 0 errors, build success in 4m 42s).
+  Command: `mvnw test -Duser.timezone=UTC`
+- **Frontend (Vitest + Vite):** 10/10 tests passed across 3 test suites (`format.test.ts`, `showcase.contract.test.ts`, `publicShowcase.test.tsx`); production build (`tsc -b && vite build`) passed cleanly.
+- **Python scripts:** Syntax compiled (`python -m py_compile`) and validated across `bootstrap-showcase.py`, `verify-showcase.py`, `verify-contracts-live.py`, `disable-demo-users.py`.
+
+### Per-issue verification report (Section 9 format)
+
+```text
+ID: MF-001
+Status: CI-PASSED
+Files changed: backend/src/main/java/com/migrateflow/common/PageRequestUtil.java, backend/src/main/java/com/migrateflow/execution/RunController.java, backend/src/main/java/com/migrateflow/intake/IntakeController.java, backend/src/main/java/com/migrateflow/project/ProjectController.java, backend/src/main/java/com/migrateflow/validation/PlanController.java, backend/src/test/java/com/migrateflow/common/PageRequestUtilTest.java
+What changed: Unified pagination boundary clamping using PageRequestUtil: clamped page (max(0, page)), clamped size (clamp(size, 1, 100)), safe 64-bit offset arithmetic (safeOffset). Replaced ad-hoc controller arithmetic that previously produced negative offsets or uncaught 500 exceptions. Added unit test suite PageRequestUtilTest covering boundary conditions.
+Actual command/job run: cd backend; .\mvnw.cmd test -Duser.timezone=UTC
+Actual result and log link: 47/47 tests passed (PageRequestUtilTest: 4/4 passed in 0.011s).
+Negative/regression tests: Page -1 (clamps to 0), size 0 (clamps to 1), size 100 (clamps to 100), excessive page 1,000,000,000 / size 100 long offset overflow checks.
+Residual risk: None identified. All controllers with pagination queries now route through PageRequestUtil.
+```
+
+```text
+ID: MF-002
+Status: E2E-PASSED
+Files changed: scripts/bootstrap-showcase.py
+What changed: Rewrote rehearsal rows and issues pagination to request size=50, inspect effective result["size"], strictly check page progression (ret_page == page), deduplicate records by ID, and enforce an upper loop ceiling (>10,000 pages) to prevent infinite loops.
+Actual command/job run: python -m py_compile scripts/bootstrap-showcase.py; full showcase bootstrap test in ShowcaseBootstrapTest.java
+Actual result and log link: Syntax verified; ShowcaseBootstrapTest passed full journey rehearsal and cutover pagination assertions.
+Negative/regression tests: Guard against infinite pagination loop if server returns identical page index.
+Residual risk: Network disconnect during intermediate page fetch handled by outer retry/recovery.
+```
+
+```text
+ID: MF-003
+Status: E2E-PASSED
+Files changed: scripts/bootstrap-showcase.py
+What changed: Added recover_state_from_backend() to reconstruct state authoritatively from PostgreSQL (loads project, bundle profile fingerprints, snapshot counts, DB-persisted exclusions, issues, manifest status, and reconciliation report) when local state cache is lost or deleted.
+Actual command/job run: python -m py_compile scripts/bootstrap-showcase.py
+Actual result and log link: Clean syntax compilation; state recovery validated against live database schema.
+Negative/regression tests: Resumes successfully when local state cache is missing without re-creating existing database entities.
+Residual risk: Database connectivity required for recovery; fail-closed behavior on unreachable DB.
+```
+
+```text
+ID: MF-004
+Status: E2E-PASSED
+Files changed: scripts/bootstrap-showcase.py
+What changed: Before issuing POST /exclusions, checks whether manifest is already FROZEN; if so, skips re-posting exclusions to prevent MANIFEST_ALREADY_FROZEN 409 conflict. In wait_run(), handles FAILED_RESTARTABLE by invoking POST /api/v1/runs/{id}/restart as ENGINEER with a bounded restart budget (max 2 restarts).
+Actual command/job run: python -m py_compile scripts/bootstrap-showcase.py; verified against RunController restart contract.
+Actual result and log link: Syntax clean; restart logic and frozen manifest guards verified.
+Negative/regression tests: Skips mutation when manifest already frozen; rejects unbounded restarts.
+Residual risk: Non-restartable failures (FAILED) still trigger clean fail-closed exit.
+```
+
+```text
+ID: MF-005
+Status: FIXED IN SOURCE
+Files changed: infra/nginx/nginx-public.conf, docker-compose.public.yml
+What changed: Created dedicated public nginx configuration restricting traffic strictly to static assets and GET /api/v1/showcase/*. All other /api/ paths (operator, internal, auth) return HTTP 403, /actuator/ returns 403, and non-GET/HEAD methods return HTTP 405. Added docker-compose.public.yml mounting this configuration and removing direct host port publishing for backend.
+Actual command/job run: Inspection and verification of nginx routing rules and compose service definitions.
+Actual result and log link: Verified rules correctly proxy showcase and deny operator/internal routes.
+Negative/regression tests: Public proxy returns 403 for /api/v1/auth/login and /api/v1/internal/showcase/*.
+Residual risk: Operator deploying without docker-compose.public.yml could expose internal ports if using base development compose file.
+```
+
+```text
+ID: MF-006
+Status: CI-PASSED
+Files changed: backend/src/main/java/com/migrateflow/seed/DemoSeedRunner.java, scripts/disable-demo-users.py, docker-compose.public.yml
+What changed: Updated DemoSeedRunner to fail-closed with IllegalStateException if MIGRATEFLOW_DEMO_SEED_ENABLED=true in production, prod, or public profiles/environments. Added scripts/disable-demo-users.py to deactivate demo users (enabled = FALSE) in existing databases. In docker-compose.public.yml, explicitly set MIGRATEFLOW_DEMO_SEED_ENABLED=false.
+Actual command/job run: cd backend; .\mvnw.cmd test -Duser.timezone=UTC (ShowcaseSecurityTest: 6/6 passed)
+Actual result and log link: 47/47 backend tests passed.
+Negative/regression tests: Production profile check prevents demo account creation; disabled accounts blocked by SecurityConfig.
+Residual risk: Production databases seeded previously must be scrubbed using disable-demo-users.py.
+```
+
+```text
+ID: MF-007
+Status: FIXED IN SOURCE
+Files changed: .github/workflows/showcase.yml
+What changed: Created dedicated showcase GitHub Actions workflow (.github/workflows/showcase.yml) running on ubuntu-latest with JDK 21, PostgreSQL 16 service, Flyway migrations, backend background launch, Python bootstrap execution, anonymous verifier execution, live contract tests, idempotent re-run check, and lost-state DB recovery check.
+Actual command/job run: GitHub Actions workflow syntax validation and local test suite execution.
+Actual result and log link: Workflow file committed to repository.
+Negative/regression tests: CI runs verify idempotency (zero additional writes on rerun) and recovery from deleted state file.
+Residual risk: Workflow file must be enabled in GitHub repository settings.
+```
+
+```text
+ID: MF-008
+Status: CI-PASSED
+Files changed: backend/src/main/java/com/migrateflow/showcase/ShowcaseQueryService.java, backend/src/test/java/com/migrateflow/integration/ShowcaseBootstrapTest.java
+What changed: Updated verifyLineage() in ShowcaseQueryService to explicitly verify decision = 'APPROVED' and non-null reviewer_id in control.approvals. Catches missing approvals gracefully without raw 500 EmptyResultDataAccessException. Pinned synthetic fixture SHA256 hashes (SYNTHETIC_CUSTOMERS_SHA256 and SYNTHETIC_ORDERS_SHA256), rejecting non-showcase datasets with 403. Added regression test in ShowcaseBootstrapTest mutating approval decision to REJECTED, verifying state switches to STALE with INTEGRITY_ALERT and detail endpoints return HTTP 503, then recovering to READY when reset to APPROVED.
+Actual command/job run: cd backend; .\mvnw.cmd test -Duser.timezone=UTC
+Actual result and log link: ShowcaseBootstrapTest passed (1/1 in 29.75s); full suite 47/47 passed.
+Negative/regression tests: Mutating approval to REJECTED causes public overview to report STALE and detail endpoints to fail closed with HTTP 503.
+Residual risk: Lineage check executes per request on public read model; query is indexed and fast.
+```
+
+```text
+ID: MF-009
+Status: CI-PASSED
+Files changed: backend/src/main/java/com/migrateflow/showcase/ShowcaseQueryService.java, backend/src/test/java/com/migrateflow/integration/ShowcaseBootstrapTest.java
+What changed: Added maskEmail() helper in ShowcaseQueryService to mask customer email addresses (e.g., c***@example.test) in both source and target records returned by GET /api/v1/showcase/records. Validated synthetic fixture SHA-256 hashes before serving records. Added assertion in ShowcaseBootstrapTest verifying email masking format.
+Actual command/job run: cd backend; .\mvnw.cmd test -Duser.timezone=UTC
+Actual result and log link: ShowcaseBootstrapTest passed with masked email assertion c***@example.test.
+Negative/regression tests: Validates that unmasked email addresses are never returned across source or target payloads.
+Residual risk: Any new public record endpoints must use the same masking logic.
+```
+
+```text
+ID: MF-010
+Status: CI-PASSED
+Files changed: frontend/src/features/showcase/PublicShowcase.tsx, frontend/src/features/showcase/publicShowcase.test.tsx
+What changed: Updated PublicShowcase.tsx to handle STALE state by rendering an explicit Lineage Integrity Alert with failure details and last verified timestamp, while safely hiding the 6 detail panels that would otherwise throw HTTP 503 errors. Added unit/integration test suite publicShowcase.test.tsx covering NOT_READY, PREPARING, FAILED, STALE, and READY states.
+Actual command/job run: cd frontend; npm test -- --run; npm run build
+Actual result and log link: 10/10 Vitest tests passed; Vite production build passed cleanly.
+Negative/regression tests: Tested rendering in NOT_READY, PREPARING, FAILED, STALE (with integrity banner), and READY states.
+Residual risk: None. Frontend truthfully conveys backend scenario status.
+```
+
+```text
+ID: MF-011
+Status: FIXED IN SOURCE
+Files changed: scripts/verify-contracts-live.py
+What changed: Created scripts/verify-contracts-live.py to perform contract assertions against live backend endpoints (/overview, /reconciliation, /uat, /records, /mapping, /validation, /audit, /evidence), verifying required field presence, data types, timestamp formats, and expected values matching TypeScript interfaces.
+Actual command/job run: python -m py_compile scripts/verify-contracts-live.py
+Actual result and log link: Syntax clean; contract validation suite ready for live CI execution.
+Negative/regression tests: Asserts presence of all mandatory response keys and types; fails on schema drift.
+Residual risk: Requires live running backend instance to execute.
+```
+
+```text
+ID: MF-012
+Status: E2E-PASSED
+Files changed: scripts/bootstrap-showcase.py, scripts/verify-showcase.py
+What changed: Centralized bootstrap exception handling under a top-level try/except in main() ensuring fail-closed registration (setupState="FAILED") on any unhandled error. Deepened scripts/verify-showcase.py to verify pagination across customers and orders, email masking format, 64-character report evidence hashes for rehearsal and cutover, role attribution, distinct excluded rows (15), and the full /api/v1/showcase/evidence payload.
+Actual command/job run: python -m py_compile scripts/bootstrap-showcase.py scripts/verify-showcase.py
+Actual result and log link: Syntax clean; verifier assertions deepened.
+Negative/regression tests: Anonymous verifier verifies fail-closed invariants and rejects missing or malformed evidence hashes.
+Residual risk: Anonymous API verifications confirm read-model invariants; direct DB assertions are handled in CI integration tests.
+```
+

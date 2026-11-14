@@ -14,6 +14,10 @@ data/
 .muse-github-snapshot-sync.json.sha256
 mvn-local.sh
 
+# Python
+__pycache__/
+*.py[cod]
+
 # IDE / OS
 .idea/
 .vscode/
