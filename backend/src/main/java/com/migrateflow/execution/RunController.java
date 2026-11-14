@@ -192,7 +192,9 @@ public class RunController {
     }
 
     private Map<String, Object> runView(Map<String, Object> run) {
-        String currentStep = "";
+        // current_step is stamped live by the step listener while the job
+        // runs; after completion it holds the last executed step.
+        String currentStep = run.get("current_step") == null ? "" : String.valueOf(run.get("current_step"));
         Object execId = run.get("batch_job_execution_id");
         if (execId != null) {
             List<String> steps = jdbc.query(

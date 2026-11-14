@@ -105,6 +105,81 @@ file remains blocked by the GitHub integration's Workflows permission and
 must be added manually). A true OS-process kill-and-restart test (beyond
 the recovery state-transition test above) is still not part of the suite.
 
+## Fix round 2 — forensic spec + workspace review, 2026-11-14
+
+A second external review covered SPEC.md itself as well as the code.
+Triaged claim by claim; the following were **confirmed and fixed**
+(branch `migrateflow-review-fixes-2`):
+
+**Implementation**
+1. **Nginx upload cap:** `infra/nginx/nginx.conf` now sets
+   `client_max_body_size 30M` — the 1 MB default would have rejected
+   legitimate bundle uploads (spec allows 10 MiB/file) with 413.
+2. **UAT evidence hash timezone:** the hash input rendered `executed_at`
+   with PostgreSQL's session-timezone-dependent cast. It now formats in
+   UTC (`to_char(... AT TIME ZONE 'UTC', ...)`), so the approval-time and
+   preflight-time digests cannot diverge by connection settings.
+3. **Live step tracking:** batch listeners stamp
+   `batch_job_instance_id`/`batch_job_execution_id` at job start and
+   `current_step` at each step start; previously both were set only
+   after the job finished, so `GET /runs/{id}` reported no step while
+   RUNNING. `runView` also falls back to the stamped column.
+4. **Restart concurrency:** `restart()` now takes the project row lock
+   and refuses while a sibling run is QUEUED/RUNNING — the
+   one-worker-per-project rule (spec 3.3) previously held only for
+   launches.
+5. **Download authorization:** `GET /files/{fileId}/download` requires
+   the ENGINEER or AUDITOR role, not mere membership (spec 10.2).
+6. **Rule-set surface completed:** `GET
+   /projects/{projectId}/rule-set-revisions/current` added; defect views
+   now carry `caseKey`, `resolvedAt`, `retestRequired` and
+   `retestPassed` for the UI's retest guidance.
+
+**Specification (SPEC.md)**
+7. §10.3 documents the pinned rule-set contract (immutable per-project
+   revisions, auto-seeded at mapping publish, optional
+   `ruleSetRevisionId` on validation start, project-ownership enforced).
+8. §6 gains exact canonical digest contracts for field-map digests, the
+   exclusion-set hash, the target-contract descriptor string, and the
+   UAT evidence hash — independently reproducible.
+9. §4.4 pins exclusion eligibility: invalid rows only; a valid row can
+   never be excluded (`ROW_NOT_INVALID`).
+10. §10.2 resolves the download role ambiguity (ENGINEER/AUDITOR; no
+    separate export-permission flag exists).
+11. §19 ADR table now mirrors `docs/adr/` (ADR-001..007) with the
+    standing design decisions listed separately; the deterministic-UUID
+    question is recorded as pinned (ADR-004), not outstanding.
+12. §13.2 aligned with ADR-006: real PostgreSQL managed outside the
+    test JVM instead of Testcontainers.
+13. §8.3 gains the explicit rehearsal-table DDL with the composite
+    primary/foreign keys, matching Flyway V007.
+
+**Frontend**
+14. `Workspace.tsx` (469 lines) is split into the §15 feature layout
+    (`features/{auth,projects,intake,mappings,validation,rehearsal,
+    reconciliation,uat,cutover,audit,workspace}`); App.tsx is a shell.
+15. UAT tab gains the rehearsal data browser (searchable run-scoped
+    customers/orders) and defect retest guidance (retest state shown;
+    close is guided, not a blind 409). Intake gains a paginated raw-row
+    preview with physical line numbers and per-file download links.
+    **Verified in this round:** `tsc -b` + Vite build pass and Vitest
+    3/3 passes with the new layout.
+
+**Tests**
+16. New `AcceptanceGapTest`: T11 defect gate end-to-end (open BLOCKER
+    blocks approval; resolve alone still blocks; close without retest
+    is 409; retest PASS then close; approval then succeeds), T14 racing
+    cutovers across two projects (exactly one 202, one 409), T18
+    post-cutover tamper detection via re-reconciliation (FAIL report),
+    T20 audit-trail completeness/attribution/ordering over a full
+    journey. T01 is covered by `scripts/smoke-compose.sh` (requires
+    Docker; not executed in the author's sandbox).
+
+Backend items remain **source-reviewed only**, for the same reason as
+before: the sandbox JVM cannot reach Maven Central, so the Java suite
+executes in CI once `ci.yml` is added. The frontend items above ARE
+executed and verified locally.
+
 ## Test inventory (what CI will execute)
 
 | Suite | Covers |
@@ -117,4 +192,5 @@ the recovery state-transition test above) is still not part of the suite.
 | `FullMigrationFlowTest` | Whole journey over HTTP on real PostgreSQL: exclusion gate, freeze, rehearsal isolation, reconciliation, UAT gate, separation of duties, idempotent cutover, exact final counts, second-cutover refusal, auth/CSRF/membership guards, malformed upload |
 | `CrashRestartTest` | Test-only fault injection kills rehearsal and cutover after committed chunks; same-identity restart finishes with exact counts and no duplicates |
 | `ProcessRecoveryTest` | A run left RUNNING by a terminated process is recovered at startup to FAILED_RESTARTABLE (stale batch executions abandoned); recovery is idempotent |
+| `AcceptanceGapTest` | T11 defect gate (blocker blocks approval; close needs a post-resolution passing retest), T14 racing cutovers (exactly one winner), T18 tampered target row fails re-reconciliation, T20 audit trail completeness and order |
 | Frontend Vitest | Formatting helpers (currency, hashes, instants, polling) |

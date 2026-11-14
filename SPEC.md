@@ -180,6 +180,8 @@ Rows with any `ERROR` issue are never inserted. A reviewer may **approve their e
 
 **Conservation invariant (per dataset):** `raw_data_rows = accepted_rows + excluded_rows`. A rejected row without a reviewer-approved exclusion blocks manifest freeze. Warnings do not change acceptance counts. Classification is mutually exclusive. Per-issue counts may overlap and must never be summed as row counts.
 
+**Exclusion eligibility (pinned):** Exclusion decisions apply **only** to rows carrying at least one `ERROR` issue. A row that passes validation can never be excluded — there is no business-initiated exclusion of valid rows (for example decommissioned or test accounts) in this design; such rows must be removed from the source export and a new bundle uploaded instead. The API enforces this: an `EXCLUDE` decision on a valid row is rejected (`422 ROW_NOT_INVALID`). A `KEEP` decision may be recorded against an invalid row to document that it was reviewed, but only `EXCLUDE` decisions resolve freeze eligibility.
+
 ---
 
 ## 5. End-to-end business workflow
@@ -250,6 +252,44 @@ The following distinctions remove the configuration/evidence circularity from th
 **Canonical digests:** Build stable UTF-8 canonical serialization with explicitly ordered fields, sorted identifiers, normalized timestamps, and SHA-256; never hash raw application object `toString()` output. The display fingerprint is a shortened rendering of the stored full digest. A change creates a new revision/snapshot/manifest. Prior approvals remain immutable for audit but become **ineligible for new cutover** if their manifest is superseded or evidence is no longer valid. After approval, further UAT executions or defect changes require a new signed evidence digest and fresh approval. Creating an unrelated draft mapping does not mutate an approved manifest; selecting a newly frozen manifest for the project supersedes the prior one.
 
 **No self-approval:** `approver_user_id != manifest.created_by` and `approver_user_id != cutover_run.requested_by`; the second check happens at cutover launch, before writing. ADMIN does not override it. UAT is bound to the same successful rehearsal used for approval. A new rehearsal requires fresh reconciliation, UAT, and approval if selected for cutover.
+
+### Canonical digest contracts (pinned)
+
+Every digest below is the lowercase hex SHA-256 of a UTF-8 string. These
+contracts are exact: an independent implementation following them must
+reproduce the stored digests byte for byte.
+
+**Field-map digests** (manifest hash, mapping hash, rule hash) use the
+canonical field serialization: fields sorted by name; each field rendered
+as `name=` followed by its value and a newline (`\n`). A `null` value
+renders as the literal `null`; a string renders as `<length>:<value>`
+(length in characters); a list renders as `[v1,v2,...]` with each element
+rendered by the same rules. The manifest hash field set is exactly:
+`bundleId`, `customersSha256`, `ordersSha256`, `mappingRevisionId`,
+`mappingHash`, `ruleSetRevisionId`, `ruleHash`, `snapshotId`,
+`exclusionHash`, `targetContractHash`.
+
+**Exclusion-set hash:** one line per excluded row,
+`<DATASET>:<sourceRowId>|<reason>|<reviewerUserId>` (dataset is
+`CUSTOMERS` or `ORDERS`), lines sorted lexicographically, joined with
+`\n` (no trailing newline).
+
+**Target contract hash:** SHA-256 of the versioned target-contract
+descriptor string. The v1 descriptor is
+`customers(external_customer_id:VARCHAR32:unique,full_name:VARCHAR200,email:VARCHAR254:nullable,joined_on:DATE:nullable);orders(external_order_id:VARCHAR32:unique,external_customer_id:FK,order_date:DATE,amount_yen:BIGINT>=0,status:NEW|PAID|SHIPPED|CANCELLED);v1`.
+Any change to the target contract must change the descriptor and bump its
+trailing version; manifests bind the descriptor hash, so a contract change
+can never silently ride on an old manifest.
+
+**UAT evidence hash:** one line per UAT case of the rehearsal, ordered by
+`case_key`: `<caseKey>=<latestResult>|<executedByUserId>|<executedAtUtc>`,
+where `executedAtUtc` is the latest execution's timestamp formatted in UTC
+as `YYYY-MM-DD"T"HH24:MI:SS.US"Z"` (microsecond precision). A case with no
+execution renders as `<caseKey>=null`. Then one line per defect of the
+rehearsal, ordered by defect ID: `defect:<defectId>=<severity>:<status>`.
+Lines joined with `\n` (no trailing newline). Because the timestamp is
+normalized to UTC before serialization, the digest is independent of the
+database session timezone.
 
 ---
 
@@ -397,7 +437,54 @@ CREATE TABLE target.orders (
 );
 ```
 
-For rehearsal, add `rehearsal_run_id UUID NOT NULL REFERENCES control.runs(id)` to both tables; define `UNIQUE (rehearsal_run_id, external_customer_id)`, `UNIQUE (rehearsal_run_id, external_order_id)` and `UNIQUE (rehearsal_run_id, id)` on rehearsal customers; define `FOREIGN KEY (rehearsal_run_id, customer_id) REFERENCES rehearsal.customers(rehearsal_run_id,id)` on rehearsal orders.
+The rehearsal tables are **not** the target tables plus a column: their
+primary keys are composite so the order-to-customer foreign key can carry
+the run scope. The authoritative DDL (Flyway `V007`):
+
+```sql
+CREATE TABLE rehearsal.customers (
+  id                   UUID NOT NULL,
+  rehearsal_run_id     UUID NOT NULL REFERENCES control.runs(id),
+  external_customer_id VARCHAR(32) NOT NULL,
+  full_name            VARCHAR(200) NOT NULL,
+  email                VARCHAR(254),
+  joined_on            DATE,
+  origin_run_id        UUID NOT NULL REFERENCES control.runs(id),
+  origin_manifest_id   UUID NOT NULL REFERENCES control.manifests(id),
+  source_file_id       UUID NOT NULL REFERENCES control.source_files(id),
+  source_row_number    INTEGER NOT NULL CHECK (source_row_number > 0),
+  created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CHECK (length(trim(full_name)) > 0),
+  CONSTRAINT rehearsal_customers_pk PRIMARY KEY (rehearsal_run_id, id),
+  CONSTRAINT rehearsal_customers_bizkey UNIQUE (rehearsal_run_id, external_customer_id)
+);
+
+CREATE TABLE rehearsal.orders (
+  id                 UUID NOT NULL,
+  rehearsal_run_id   UUID NOT NULL REFERENCES control.runs(id),
+  external_order_id  VARCHAR(32) NOT NULL,
+  customer_id        UUID NOT NULL,
+  order_date         DATE NOT NULL,
+  amount_yen         BIGINT NOT NULL CHECK (amount_yen >= 0),
+  status             VARCHAR(16) NOT NULL CHECK (status IN ('NEW','PAID','SHIPPED','CANCELLED')),
+  origin_run_id      UUID NOT NULL REFERENCES control.runs(id),
+  origin_manifest_id UUID NOT NULL REFERENCES control.manifests(id),
+  source_file_id     UUID NOT NULL REFERENCES control.source_files(id),
+  source_row_number  INTEGER NOT NULL CHECK (source_row_number > 0),
+  created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CONSTRAINT rehearsal_orders_pk PRIMARY KEY (rehearsal_run_id, id),
+  CONSTRAINT rehearsal_orders_bizkey UNIQUE (rehearsal_run_id, external_order_id),
+  CONSTRAINT rehearsal_orders_customer_fk
+      FOREIGN KEY (rehearsal_run_id, customer_id)
+      REFERENCES rehearsal.customers (rehearsal_run_id, id)
+);
+```
+
+So: business keys are unique per run (`UNIQUE (rehearsal_run_id,
+external_*)`), the customers primary key is `(rehearsal_run_id, id)`, and
+the orders foreign key is the composite `(rehearsal_run_id, customer_id)`
+referencing `rehearsal.customers(rehearsal_run_id, id)` — an order can
+never reference a customer row from a different rehearsal run.
 
 **Deletion and storage policy:** No cascade-delete from manifests/runs/files into source or target business data. A separate **demo-only maintenance script** may reset the entire synthetic environment, never a public API endpoint. File retention cleanup must refuse to delete a source file referenced by a retained manifest.
 
@@ -478,7 +565,7 @@ Base path: `/api/v1`. All business endpoints require a valid session and relevan
 | `POST` | `/projects/{projectId}/bundles` | ENGINEER | Multipart customers+orders; `201` bundle metadata |
 | `GET` | `/bundles/{bundleId}/profile` | Member | Dataset profiles/row counts |
 | `GET` | `/files/{fileId}/rows` | Member | Paginated source preview, redacted where appropriate |
-| `GET` | `/files/{fileId}/download` | Member with export permission | Authorized, streamed download |
+| `GET` | `/files/{fileId}/download` | ENGINEER or AUDITOR member | Authorized, streamed download of the raw source file. Raw export is restricted to these two roles; REVIEWER members may preview rows in-app but may not download raw files. There is no separate "export permission" flag — the fixed role set is the permission model. |
 
 ### 10.3 Plans, validation, and freeze
 
@@ -486,7 +573,19 @@ Base path: `/api/v1`. All business endpoints require a valid session and relevan
 |---|---|---|---|
 | `POST` | `/projects/{projectId}/mapping-revisions` | ENGINEER | Publish validated mapping revision |
 | `GET` | `/mapping-revisions/{revisionId}` | Member | Immutable mapping definition |
-| `POST` | `/projects/{projectId}/validation-snapshots` | ENGINEER | Start validation using bundle/mapping/rules; `202` |
+| `POST` | `/projects/{projectId}/validation-snapshots` | ENGINEER | Start validation using bundle/mapping/rules; `202`. The bundle, mapping revision and (when supplied) rule-set revision must all belong to this project — foreign IDs are `404` |
+| `GET` | `/projects/{projectId}/rule-set-revisions/current` | Member | The project's current default rule-set revision (ID, version, rule hash) |
+
+**Rule sets (pinned):** Rule-set revisions are immutable, versioned per
+project, and seeded automatically: publishing a mapping revision ensures
+the project's default rule-set revision exists (version 1 contains the
+§4.4 rule semantics) and returns its ID alongside the mapping revision.
+There is no user-facing rule-set authoring endpoint in v1 — rule semantics
+change by shipping a new rule-set version in code, never by editing a
+revision in place. `POST /validation-snapshots` accepts an optional
+`ruleSetRevisionId`; when omitted, the project's current default is used.
+Every snapshot and manifest records the exact `ruleSetRevisionId` and rule
+hash it was produced under.
 | `GET` | `/validation-snapshots/{snapshotId}` | Member | Validation progress/summary |
 | `GET` | `/validation-snapshots/{snapshotId}/issues` | Member | Paginated row-level issues |
 | `POST` | `/validation-snapshots/{snapshotId}/exclusions` | REVIEWER | Record documented exclusion decisions |
@@ -676,7 +775,9 @@ Create an explicit **deterministic** generator with fixed seed; do not manually 
 | T19 | RBAC and CSRF | Wrong role, foreign project, missing CSRF denied |
 | T20 | Audit evidence | Actor, manifest, input digests, UAT, approvals, reports traceable |
 
-Use JUnit 5, Spring Boot integration tests, PostgreSQL Testcontainers for real constraints/transactions, MockMvc for HTTP security, and one browser-level smoke flow. Run tests via GitHub Actions on pull requests. Controlled fault injection should be test-only, not a publicly accessible debugging endpoint.
+Use JUnit 5, Spring Boot integration tests against a **real PostgreSQL** for constraints/transactions, MockMvc for HTTP security, and one browser-level smoke flow. Run tests via GitHub Actions on pull requests. Controlled fault injection should be test-only, not a publicly accessible debugging endpoint.
+
+**Test database (pinned by ADR-006):** Integration tests do **not** use Testcontainers. They run against a real PostgreSQL 16 managed outside the test JVM — a developer-provided local instance locally, and a `postgres:16` service container in CI — so the suite stays runnable in sandboxes where the JVM cannot reach a Docker daemon or a Maven mirror. The schema the tests exercise is the production Flyway schema; nothing about constraints or transactions is mocked.
 
 ---
 
@@ -877,29 +978,48 @@ Do not claim enterprise adoption, regulatory compliance, production operational 
 
 ## 19. Design decisions and implementation cautions
 
+The implementation decisions are recorded as ADR files in `docs/adr/`;
+this table mirrors them and is the index — if the two ever disagree, the
+ADR files win and this table is the defect.
+
 | ADR | Decision | Why |
 |---|---|---|
-| ADR-001 | CSV-to-known-schema only | Solves one credible business problem end to end |
-| ADR-002 | Single PostgreSQL with four named schemas | Demonstrates safe transactions/rehearsal without cross-database semantics |
-| ADR-003 | Snapshot before manifest; evidence after rehearsal | Avoids circular, changeable approvals |
-| ADR-004 | All duplicate business-key occurrences invalid | Makes conflict handling predictable and auditable |
-| ADR-005 | Invalid rows may be excluded, never silently repaired | Reviewer decides what is omitted; transformation rules are explicit |
-| ADR-006 | Run-scoped rehearsal keys and foreign keys | Supports multiple rehearsals without cross-run data leakage |
-| ADR-007 | One reserved final run with same-identity restarts | Prevents duplicate or conflicting final writes |
-| ADR-008 | No general rollback endpoint | Avoids making unsafe claims about partial committed migrations |
-| ADR-009 | HTTP sessions and framework CSRF | Suits the single-origin browser application without custom token lifecycle |
-| ADR-010 | Correctness tests precede UI polish/performance claims | Makes portfolio evidence demonstrable |
+| ADR-001 (`docs/adr/ADR-001-stack.md`) | Java 21, Spring Boot 3.5.7, Spring Batch 5.2, PostgreSQL 16, React 19 | Exact pins; Batch metadata DDL vendored to match the pinned Batch version |
+| ADR-002 (`docs/adr/ADR-002-jdbc-over-jpa.md`) | Plain Spring JDBC over JPA/Hibernate | The domain is set-based SQL, composite keys and explicit transactions |
+| ADR-003 (`docs/adr/ADR-003-csv-parser-choice.md`) | Own strict RFC 4180-subset parser | Exact physical-line tracking with quoted newlines is a domain requirement |
+| ADR-004 (`docs/adr/ADR-004-deterministic-target-ids.md`) | Deterministic target UUIDs (UUIDv5 over run-independent business identity) | Insert-only replay and restart must converge on the same row identity |
+| ADR-005 (`docs/adr/ADR-005-cutover-slot-singleton.md`) | Singleton cutover slot row reserved in a transaction | One final writer globally, race-free across projects |
+| ADR-006 (`docs/adr/ADR-006-no-testcontainers.md`) | Real PostgreSQL managed outside the test JVM (local or CI service) | Tests must run where the JVM cannot reach Docker or a Maven mirror |
+| ADR-007 (`docs/adr/ADR-007-session-auth.md`) | Server-side sessions + Spring Security CSRF (SPA token pattern) | Same-origin app; no custom token lifecycle |
 
-### Outstanding implementation choices to pin at M1
+Standing product/design decisions (argued in the sections noted, not
+separate ADR files): CSV-to-known-schema only (§1); single PostgreSQL
+with four named schemas (§8.1); snapshot before manifest, evidence after
+rehearsal (§6); all duplicate business-key occurrences invalid (§4.4);
+invalid rows may be excluded, never silently repaired (§4.4); run-scoped
+rehearsal keys and composite foreign keys (§8.3); one reserved final run
+with same-identity restarts (§7.2); no general rollback endpoint (§1);
+correctness tests precede UI polish and performance claims (§13).
 
-1. Exact stable Spring Boot/Spring Batch/Security patch versions and matching Batch metadata DDL.
-2. CSV parser library and explicit strategy for physical-line tracking with quoted newlines.
-3. The same-origin server configuration for Docker and for Vite development.
-4. Whether replay checking uses deterministic target UUIDs or ledger lookup first; either must detect mismatched values and commit ledger and business rows together.
-5. Canonical JSON/hash serialization implementation, including null handling, Unicode normalization policy, and stable field order.
-6. Exact authentication/session timeout, login throttle, and minimum reporting permissions.
+### Implementation choices pinned at M1
 
-These are **bounded engineering choices**, not permission to change the product scope. Record the final decisions in ADRs before implementing affected modules.
+1. **Versions:** Spring Boot 3.5.7 / Spring Batch 5.2 with matching
+   vendored Batch metadata DDL — ADR-001.
+2. **CSV parsing:** own strict parser with explicit physical-line
+   tracking — ADR-003.
+3. **Same-origin serving:** nginx reverse-proxies `/api/` in Docker; the
+   Vite dev server proxies `/api` in development — one origin in both.
+4. **Replay checking:** deterministic target UUIDs — ADR-004. (This was
+   previously listed as outstanding; it is not optional. In an
+   insert-only restartable batch model, deterministic identity is what
+   makes replay converge, and the applied-rows ledger check runs in the
+   same chunk transaction as the business insert.)
+5. **Canonical serialization:** the digest contracts in §6 (sorted field
+   names, length-prefixed strings, literal `null`, UTC-normalized
+   timestamps).
+6. **Still open:** exact session timeout values, login-throttle tuning,
+   and reporting-permission granularity beyond the fixed role set
+   (§10.2). These are operational tunables, not scope changes.
 
 ### Technical references
 

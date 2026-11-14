@@ -2,7 +2,11 @@ package com.migrateflow.execution;
 
 import org.springframework.batch.core.ChunkListener;
 import org.springframework.batch.core.Job;
+import org.springframework.batch.core.JobExecution;
+import org.springframework.batch.core.JobExecutionListener;
 import org.springframework.batch.core.Step;
+import org.springframework.batch.core.StepExecution;
+import org.springframework.batch.core.StepExecutionListener;
 import org.springframework.batch.core.configuration.annotation.StepScope;
 import org.springframework.batch.core.job.builder.JobBuilder;
 import org.springframework.batch.core.repository.JobRepository;
@@ -183,17 +187,53 @@ public class BatchConfig {
         };
     }
 
+    /**
+     * Live run tracking: RunService used to stamp the batch ids onto
+     * control.runs only AFTER jobLauncher.run returned, so while a job was
+     * RUNNING the API reported no current step. These listeners stamp the
+     * execution ids at job start and the step name at each step start.
+     */
+    @Bean
+    public JobExecutionListener runTrackingJobListener(JdbcTemplate jdbc) {
+        return new JobExecutionListener() {
+            @Override
+            public void beforeJob(JobExecution execution) {
+                String runId = execution.getJobParameters().getString("runId");
+                if (runId != null) {
+                    jdbc.update("UPDATE control.runs SET batch_job_instance_id = ?, batch_job_execution_id = ? WHERE id = ?",
+                            execution.getJobInstance().getId(), execution.getId(), UUID.fromString(runId));
+                }
+            }
+        };
+    }
+
+    @Bean
+    public StepExecutionListener runTrackingStepListener(JdbcTemplate jdbc) {
+        return new StepExecutionListener() {
+            @Override
+            public void beforeStep(StepExecution stepExecution) {
+                String runId = stepExecution.getJobParameters().getString("runId");
+                if (runId != null) {
+                    jdbc.update("UPDATE control.runs SET current_step = ? WHERE id = ?",
+                            stepExecution.getStepName(), UUID.fromString(runId));
+                }
+            }
+        };
+    }
+
     @Bean
     public Step loadCustomersStep(JobRepository jobRepository, PlatformTransactionManager txManager,
                                   ListReader<AcceptedRows.CustomerTarget> customerReader,
                                   ItemWriter<AcceptedRows.CustomerTarget> customerWriter,
                                   ChunkListener faultChunkListener,
+                                  StepExecutionListener runTrackingStepListener,
                                   @Value("${migrateflow.batch-chunk-size}") int chunkSize) {
         return new StepBuilder("loadCustomers", jobRepository)
                 .<AcceptedRows.CustomerTarget, AcceptedRows.CustomerTarget>chunk(chunkSize, txManager)
                 .reader(customerReader)
                 .writer(customerWriter)
                 .listener(faultChunkListener)
+                .listener(runTrackingStepListener)
                 .build();
     }
 
@@ -202,24 +242,30 @@ public class BatchConfig {
                                ListReader<AcceptedRows.OrderTarget> orderReader,
                                ItemWriter<AcceptedRows.OrderTarget> orderWriter,
                                ChunkListener faultChunkListener,
+                               StepExecutionListener runTrackingStepListener,
                                @Value("${migrateflow.batch-chunk-size}") int chunkSize) {
         return new StepBuilder("loadOrders", jobRepository)
                 .<AcceptedRows.OrderTarget, AcceptedRows.OrderTarget>chunk(chunkSize, txManager)
                 .reader(orderReader)
                 .writer(orderWriter)
                 .listener(faultChunkListener)
+                .listener(runTrackingStepListener)
                 .build();
     }
 
     @Bean
-    public Job rehearsalJob(JobRepository jobRepository, Step loadCustomersStep, Step loadOrdersStep) {
+    public Job rehearsalJob(JobRepository jobRepository, Step loadCustomersStep, Step loadOrdersStep,
+                            JobExecutionListener runTrackingJobListener) {
         return new JobBuilder("rehearsalJob", jobRepository)
+                .listener(runTrackingJobListener)
                 .start(loadCustomersStep).next(loadOrdersStep).build();
     }
 
     @Bean
-    public Job cutoverJob(JobRepository jobRepository, Step loadCustomersStep, Step loadOrdersStep) {
+    public Job cutoverJob(JobRepository jobRepository, Step loadCustomersStep, Step loadOrdersStep,
+                          JobExecutionListener runTrackingJobListener) {
         return new JobBuilder("cutoverJob", jobRepository)
+                .listener(runTrackingJobListener)
                 .start(loadCustomersStep).next(loadOrdersStep).build();
     }
 }

@@ -33,6 +33,20 @@ terminated process is marked `FAILED_RESTARTABLE` (its stale batch
 executions abandoned) so the ordinary restart path can resume it. A test
 that kills a real OS process mid-batch is not part of the suite.
 
+`AcceptanceGapTest` covers the acceptance rows the first suite left thin:
+T11 in full (an unresolved BLOCKER defect blocks approval; closing a
+defect requires a passing retest recorded after resolution), T14 (two
+projects racing cutover launches — exactly one is accepted, the other
+conflicts), T18 (a target row altered after a verified cutover makes a
+fresh reconciliation FAIL), and T20 (the audit trail of a full journey is
+complete, attributed, and chronologically ordered).
+
+T01 (clean Docker startup) is covered by `scripts/smoke-compose.sh`,
+which builds the Compose stack, waits for the health endpoint through
+the nginx proxy, checks the SPA is served and the demo login works, then
+tears the stack down. It runs where Docker is available; it is not part
+of the JUnit suite.
+
 Integration tests need a reachable PostgreSQL:
 
 ```bash

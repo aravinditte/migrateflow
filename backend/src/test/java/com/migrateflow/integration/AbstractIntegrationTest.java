@@ -200,6 +200,64 @@ public abstract class AbstractIntegrationTest {
         return rows.size();
     }
 
+    protected static final String[] UAT_CASE_KEYS = {
+            "COUNTS_MATCH", "CUSTOMER_SPOT_CHECK", "ORDER_TOTALS", "EXCLUSIONS_ABSENT", "PROVENANCE_TRACE"};
+
+    protected String approvalJson(UUID rehearsalId, UUID reportId, String uatHash) {
+        return "{\"decision\":\"APPROVE\",\"rehearsalRunId\":\"" + rehearsalId
+                + "\",\"reconciliationReportId\":\"" + reportId + "\",\"uatEvidenceHash\":\"" + uatHash
+                + "\",\"comment\":\"verified\"}";
+    }
+
+    protected UUID launchRehearsal(MockHttpSession engineer, UUID manifestId) throws Exception {
+        MvcResult result = mvc.perform(post("/api/v1/manifests/" + manifestId + "/rehearsals")
+                        .session(engineer).with(csrf()))
+                .andExpect(status().isAccepted()).andReturn();
+        return UUID.fromString(json(result).get("runId").asText());
+    }
+
+    protected void passAllUat(MockHttpSession reviewer, UUID rehearsalId) throws Exception {
+        for (String caseKey : UAT_CASE_KEYS) {
+            mvc.perform(post("/api/v1/rehearsals/" + rehearsalId + "/uat-executions")
+                            .session(reviewer).with(csrf()).contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"caseKey\":\"" + caseKey + "\",\"result\":\"PASS\",\"actualResult\":\"verified\"}"))
+                    .andExpect(status().isCreated());
+        }
+    }
+
+    protected String currentUatHash(MockHttpSession session, UUID rehearsalId) throws Exception {
+        MvcResult result = mvc.perform(get("/api/v1/rehearsals/" + rehearsalId + "/uat").session(session))
+                .andExpect(status().isOk()).andReturn();
+        return json(result).get("uatEvidenceHash").asText();
+    }
+
+    protected UUID reconciliationReportId(MockHttpSession session, UUID runId) throws Exception {
+        MvcResult result = mvc.perform(get("/api/v1/runs/" + runId + "/reconciliation").session(session))
+                .andExpect(status().isOk()).andReturn();
+        return UUID.fromString(json(result).get("reportId").asText());
+    }
+
+    /**
+     * Full journey to a signed approval.
+     * Returns [projectId, manifestId, rehearsalRunId, reportId, approvalId].
+     */
+    protected UUID[] prepareApproved(MockHttpSession engineer, MockHttpSession reviewer) throws Exception {
+        UUID[] ids = prepareValidated(engineer);
+        excludeAllInvalid(reviewer, ids[3]);
+        UUID manifestId = freeze(engineer, ids[0], ids[1], ids[2], ids[3]);
+        UUID rehearsalId = launchRehearsal(engineer, manifestId);
+        awaitRun(engineer, rehearsalId);
+        UUID reportId = reconciliationReportId(engineer, rehearsalId);
+        passAllUat(reviewer, rehearsalId);
+        String uatHash = currentUatHash(reviewer, rehearsalId);
+        MvcResult approval = mvc.perform(post("/api/v1/manifests/" + manifestId + "/approvals")
+                        .session(reviewer).with(csrf()).contentType(MediaType.APPLICATION_JSON)
+                        .content(approvalJson(rehearsalId, reportId, uatHash)))
+                .andExpect(status().isCreated()).andReturn();
+        UUID approvalId = UUID.fromString(json(approval).get("approvalId").asText());
+        return new UUID[]{ids[0], manifestId, rehearsalId, reportId, approvalId};
+    }
+
     protected UUID freeze(MockHttpSession engineer, UUID projectId, UUID bundleId, UUID mappingId, UUID snapshotId) throws Exception {
         MvcResult result = mvc.perform(post("/api/v1/projects/" + projectId + "/manifests")
                         .session(engineer).with(csrf()).contentType(MediaType.APPLICATION_JSON)

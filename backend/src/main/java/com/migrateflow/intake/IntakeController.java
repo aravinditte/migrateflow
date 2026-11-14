@@ -106,7 +106,10 @@ public class IntakeController {
     @GetMapping("/files/{fileId}/download")
     public ResponseEntity<FileSystemResource> download(@PathVariable UUID fileId, Authentication auth) {
         AppUser actor = SecurityConfig.requireUser(users, auth);
-        access.requireMembership(actor, access.projectOfFile(fileId));
+        // Raw source export is restricted to ENGINEER and AUDITOR members
+        // (spec 10.2 / 3.1); membership alone - e.g. a REVIEWER - is not
+        // enough to take raw legacy data out of the system.
+        access.requireProjectRole(actor, access.projectOfFile(fileId), "ENGINEER", "AUDITOR");
         Map<String, String> file = jdbc.query(
                 "SELECT filename, storage_key FROM control.source_files WHERE id = ?",
                 (rs, n) -> Map.of("filename", rs.getString("filename"), "storageKey", rs.getString("storage_key")),
