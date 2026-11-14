@@ -66,3 +66,20 @@ instead of racing.
   manifest creator cannot approve it; the approver cannot launch cutover.
 - Uploaded files are stored outside the database under random keys, never
   under client-supplied names; downloads re-check membership.
+
+## Public showcase layer
+
+The showcase (SPEC section 20) is a presentation/read-model layer over the
+existing workflow, not a second engine. `control.showcase_scenarios`
+(V012) holds pointers to one verified journey's artifacts.
+`ShowcaseQueryService` builds every public figure from those artifacts on
+each request and re-verifies lineage (project coherence, manifest binding,
+run/report status, approval-to-UAT-hash binding, slot state, target counts
+and sums, applied-rows ledger) before presenting READY; a mismatch yields
+STALE/INTEGRITY_ALERT, never a stale green. `scripts/bootstrap-showcase.py`
+is a deployment-side orchestrator that produces the scenario through the
+ordinary authenticated HTTP workflow with the synthetic demo actors, then
+registers the pointers through a token-guarded internal endpoint that
+re-runs the same lineage verification before accepting READY. Guest and
+operator modes share the database but not the API surface: anonymous
+traffic can only reach the GET-only showcase namespace.
