@@ -20,6 +20,11 @@ services:
       SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-migrateflow}
       SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-migrateflow-dev-pw}
       MIGRATEFLOW_DEMO_SEED_ENABLED: ${MIGRATEFLOW_DEMO_SEED_ENABLED:-true}
+      # Public showcase bootstrap gate (Automated Showcase spec 4.2):
+      # stays disabled unless the operator opts in AND sets a token.
+      MIGRATEFLOW_SHOWCASE_BOOTSTRAP_ENABLED: ${MIGRATEFLOW_SHOWCASE_BOOTSTRAP_ENABLED:-false}
+      MIGRATEFLOW_SHOWCASE_BOOTSTRAP_TOKEN: ${MIGRATEFLOW_SHOWCASE_BOOTSTRAP_TOKEN:-}
+      MIGRATEFLOW_SHOWCASE_SLUG: ${MIGRATEFLOW_SHOWCASE_SLUG:-hinata-trading}
       MIGRATEFLOW_ENGINEER_PASSWORD: ${MIGRATEFLOW_ENGINEER_PASSWORD:-engineer-dev-pw}
       MIGRATEFLOW_REVIEWER_PASSWORD: ${MIGRATEFLOW_REVIEWER_PASSWORD:-reviewer-dev-pw}
       MIGRATEFLOW_AUDITOR_PASSWORD: ${MIGRATEFLOW_AUDITOR_PASSWORD:-auditor-dev-pw}
@@ -30,7 +35,7 @@ services:
       db:
         condition: service_healthy
     ports:
-      - "127.0.0.1:${BACKEND_PORT:-8081}:8081"
+      - "8081:8081"
 
   frontend:
     build:
@@ -39,7 +44,29 @@ services:
     depends_on:
       - backend
     ports:
-      - "127.0.0.1:${FRONTEND_PORT:-8080}:80"
+      - "8080:80"
+
+  # One-time public showcase bootstrap (opt-in profile, spec section 4).
+  # Drives the REAL workflow over HTTP with the seeded demo actors and
+  # registers the verified scenario. Idempotent; never resets anything.
+  # Run once per fresh database:
+  #   MIGRATEFLOW_SHOWCASE_BOOTSTRAP_ENABLED=true \
+  #   MIGRATEFLOW_SHOWCASE_BOOTSTRAP_TOKEN=<secret> \
+  #   docker compose --profile showcase up showcase-bootstrap
+  showcase-bootstrap:
+    image: python:3.12-slim
+    profiles: ["showcase"]
+    depends_on:
+      - backend
+    environment:
+      MIGRATEFLOW_BASE_URL: http://backend:8081
+      MIGRATEFLOW_SHOWCASE_BOOTSTRAP_TOKEN: ${MIGRATEFLOW_SHOWCASE_BOOTSTRAP_TOKEN:-}
+      MIGRATEFLOW_FIXTURES_DIR: /app/fixtures
+    volumes:
+      - ./scripts:/app/scripts:ro
+      - ./fixtures:/app/fixtures:ro
+    working_dir: /app
+    command: ["python3", "scripts/bootstrap-showcase.py"]
 
 volumes:
   pgdata:
