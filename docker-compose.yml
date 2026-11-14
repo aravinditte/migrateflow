@@ -1,0 +1,46 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-migrateflow}
+      POSTGRES_USER: ${POSTGRES_USER:-migrateflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-migrateflow-dev-pw}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-migrateflow}"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  backend:
+    build: ./backend
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/${POSTGRES_DB:-migrateflow}
+      SPRING_DATASOURCE_USERNAME: ${POSTGRES_USER:-migrateflow}
+      SPRING_DATASOURCE_PASSWORD: ${POSTGRES_PASSWORD:-migrateflow-dev-pw}
+      MIGRATEFLOW_DEMO_SEED_ENABLED: ${MIGRATEFLOW_DEMO_SEED_ENABLED:-true}
+      MIGRATEFLOW_ENGINEER_PASSWORD: ${MIGRATEFLOW_ENGINEER_PASSWORD:-engineer-dev-pw}
+      MIGRATEFLOW_REVIEWER_PASSWORD: ${MIGRATEFLOW_REVIEWER_PASSWORD:-reviewer-dev-pw}
+      MIGRATEFLOW_AUDITOR_PASSWORD: ${MIGRATEFLOW_AUDITOR_PASSWORD:-auditor-dev-pw}
+      MIGRATEFLOW_ADMIN_PASSWORD: ${MIGRATEFLOW_ADMIN_PASSWORD:-admin-dev-pw}
+    volumes:
+      - uploads:/var/migrateflow/uploads
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8081:8081"
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    depends_on:
+      - backend
+    ports:
+      - "8080:80"
+
+volumes:
+  pgdata:
+  uploads:

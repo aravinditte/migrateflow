@@ -1,0 +1,32 @@
+{
+  "customers": {
+    "rawRows": 1000,
+    "excludedRows": 5,
+    "acceptedRows": 995,
+    "excludedRowNumbers": [
+      7,
+      13,
+      20,
+      21,
+      34
+    ]
+  },
+  "orders": {
+    "rawRows": 2000,
+    "excludedRows": 10,
+    "acceptedRows": 1990,
+    "excludedRowNumbers": [
+      9,
+      10,
+      11,
+      12,
+      13,
+      14,
+      15,
+      16,
+      17,
+      18
+    ],
+    "acceptedAmountTotalYen": 21998650
+  }
+}
