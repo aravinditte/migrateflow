@@ -12,6 +12,7 @@ import org.springframework.batch.core.Job;
 import org.springframework.batch.core.JobExecution;
 import org.springframework.batch.core.JobParameters;
 import org.springframework.batch.core.JobParametersBuilder;
+import org.springframework.batch.core.explore.JobExplorer;
 import org.springframework.batch.core.launch.JobLauncher;
 import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.HttpStatus;
@@ -38,6 +39,7 @@ public class RunService {
     private final JdbcTemplate jdbc;
     private final AuditService audit;
     private final JobLauncher jobLauncher;
+    private final JobExplorer jobExplorer;
     private final Job rehearsalJob;
     private final Job cutoverJob;
     private final ReconciliationService reconciliation;
@@ -46,7 +48,7 @@ public class RunService {
     private final Executor executor;
     private final TransactionTemplate txTemplate;
 
-    public RunService(JdbcTemplate jdbc, AuditService audit, JobLauncher jobLauncher,
+    public RunService(JdbcTemplate jdbc, AuditService audit, JobLauncher jobLauncher, JobExplorer jobExplorer,
                       @Qualifier("rehearsalJob") Job rehearsalJob, @Qualifier("cutoverJob") Job cutoverJob,
                       ReconciliationService reconciliation, AcceptedRows acceptedRows, UatService uat,
                       @Qualifier("migrateflowTaskExecutor") Executor executor,
@@ -54,6 +56,7 @@ public class RunService {
         this.jdbc = jdbc;
         this.audit = audit;
         this.jobLauncher = jobLauncher;
+        this.jobExplorer = jobExplorer;
         this.rehearsalJob = rehearsalJob;
         this.cutoverJob = cutoverJob;
         this.reconciliation = reconciliation;
