@@ -561,7 +561,6 @@ Base path: `/api/v1`. All business endpoints require a valid session and relevan
 | `POST` | `/projects` | ENGINEER | Create project |
 | `GET` | `/projects` | Member | Paginated accessible projects |
 | `GET` | `/projects/{projectId}` | Member | Project summary |
-| `GET` | `/projects/{projectId}/workflow` | Member | Active workflow stage IDs (bundle, mapping, snapshot, manifest, runs) for workspace hydration |
 | `POST` | `/projects/{projectId}/archive` | ENGINEER | Archive if no active work |
 | `POST` | `/projects/{projectId}/bundles` | ENGINEER | Multipart customers+orders; `201` bundle metadata |
 | `GET` | `/bundles/{bundleId}/profile` | Member | Dataset profiles/row counts |
@@ -1034,3 +1033,51 @@ correctness tests precede UI polish and performance claims (§13).
 ---
 
 **Final delivery standard:** A reviewer can reproduce the entire approved data journey from immutable imperfect exports to verified final rows, understand exactly what was excluded and why, prove approval belonged to the executed revision, and restart a failed committed batch without duplicating records. If any of these statements cannot yet be demonstrated with tests, that capability is not complete.
+
+---
+
+## 20. Automated public showcase (portfolio mode)
+
+MigrateFlow has two modes. The **operator workbench** (sections 1–19) is the authenticated, role-gated product. The **public showcase** is a read-only presentation layer over one real, completed execution of that product, so a portfolio visitor can inspect genuine evidence without signing in or running the workflow.
+
+**Non-negotiable principle.** Source business data is synthetic and generated. The backend, validation engine, PostgreSQL tables, Spring Batch jobs, reconciliation, UAT records, approval controls, final cutover, authorization, audit trail and displayed results are genuine outputs of the workflow above. No hard-coded success screens, fake API responses, fabricated timestamps or invented figures are permitted anywhere in the showcase path.
+
+### 20.1 Scenario registry
+
+`control.showcase_scenarios` (migration V012) stores **pointers** to real artifacts — project, bundle, mapping revision, rule-set revision, snapshot, manifest, rehearsal run, approval, cutover run — plus bootstrap progress (`setup_state` ∈ PREPARING / READY / FAILED / STALE, `setup_step`, `bootstrap_version`, `failure_message`, `verified_at`). A registry row is never itself evidence: the read model re-reads the domain tables and re-verifies lineage on every request. `READY` is stored only after lineage verification passes.
+
+### 20.2 One-time bootstrap
+
+A trusted deployment-side command, `scripts/bootstrap-showcase.py`, runs **once per fresh demo database**. It authenticates as the synthetic demo actors and drives the real HTTP workflow: project + memberships (ADMIN), paired upload (ENGINEER), mapping publish, async validation, an `EXCLUDE` decision with a specific reason for every distinct invalid row (REVIEWER), manifest freeze (ENGINEER), rehearsal (ENGINEER), the five scripted UAT checks (REVIEWER — each PASS conditional on a real assertion against live artifacts: counts, spot checks, totals, exclusion absence, provenance), approval (REVIEWER, with the then-current UAT evidence hash), and cutover (ENGINEER, durable idempotency key). Properties: opt-in (`MIGRATEFLOW_SHOWCASE_BOOTSTRAP_ENABLED`, default false) plus a shared token; idempotent (a READY registry ends the run); resumable from recorded artifact IDs; never resets or truncates; never inserts directly into target/rehearsal/approvals/reports; fail-closed (any failed gate records FAILED). Progress and failure are registered through the internal endpoint `POST /api/v1/internal/showcase/register`, which requires an authenticated session **and** the bootstrap token **and** the enabled flag, and refuses a READY write whose lineage does not verify (422 with the problems listed).
+
+Sign-off truthfulness: UAT and approval are *automated synthetic* acts by demo actors through the real gates, and are labeled as such everywhere they are displayed. They are never described as human business approval.
+
+### 20.3 Public read API
+
+Anonymous, GET-only, under `/api/v1/showcase/**` (SecurityConfig permits anonymous GET for this namespace only; the controller has no mutation handlers):
+
+| Route | Source |
+|---|---|
+| `GET /overview` | Registry + project, snapshot counts, run statuses, latest reports, target money totals |
+| `GET /workflow` | The 11 stages, each derived from its linked artifact with its real timestamp |
+| `GET /validation?page&size` | ERROR validation issues of the showcase snapshot + latest exclusion decision per row |
+| `GET /mapping` | Published mapping revision + rule set (definitions and hashes) |
+| `GET /reconciliation?scope=rehearsal\|cutover` | The stored report for the exact run |
+| `GET /uat` | UAT cases with latest executions, defects, approval summary |
+| `GET /audit?page&size` | Sanitized audit events (action, entity, actor role, time — no emails or details) |
+| `GET /records?kind&page&size` | Whitelisted source→target joined rows with provenance |
+| `GET /evidence` | The sanitized evidence bundle as a JSON download |
+
+Pagination is hard-capped (size ≤ 50). Before a scenario exists, `/overview` answers 200 with `setupState = NOT_READY` and the data endpoints answer 503 — never placeholder data.
+
+### 20.4 Read-model invariants
+
+Before a scenario is presented as READY (at registration and on every overview read), lineage is re-verified: one project across all artifacts; manifest binds the exact bundle/mapping/rules/snapshot; snapshot COMPLETED; manifest FROZEN; both runs VERIFIED of that manifest; latest reconciliation report per run is PASS; approval binds the same manifest, rehearsal, report and the *current* UAT evidence hash; no open/resolved BLOCKER or CRITICAL defect and every required UAT case's latest execution is PASS; the cutover slot is VERIFIED by the showcase cutover run; target counts and order totals equal the accepted snapshot and the reconciled written total; the applied-rows ledger for the cutover holds exactly the accepted row count. Any failure downgrades the response to STALE / INTEGRITY_ALERT with the problems listed — a historical PASS is never silently presented as current integrity.
+
+### 20.5 One cutover per database
+
+The singleton insert-only final target means one verified showcase cutover consumes the slot for the database's lifetime. Visitors view the completed scenario; nobody can trigger another cutover, a reset, or any write through the public surface. An interactive per-visitor sandbox is explicitly out of scope for this mode.
+
+### 20.6 Acceptance
+
+The showcase is complete only when: a clean database bootstraps end-to-end via the script with no manual UI steps; re-running the bootstrap changes nothing; anonymous reads serve the genuine fixture outcomes (995 / 1,990 / ¥21,998,650 for the checked-in dataset) with integrity OK; anonymous writes are rejected; a tampered target downgrades the overview to an integrity alert; and `scripts/verify-showcase.py` (anonymous, read-only) passes against the deployed instance.
