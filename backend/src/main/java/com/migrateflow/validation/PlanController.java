@@ -63,6 +63,21 @@ public class PlanController {
                 "definition", published.canonicalJson()));
     }
 
+    @GetMapping("/projects/{projectId}/rule-set-revisions/current")
+    public Map<String, Object> currentRuleSet(@PathVariable UUID projectId, Authentication auth) {
+        AppUser actor = SecurityConfig.requireUser(users, auth);
+        access.requireMembership(actor, projectId);
+        return jdbc.query("SELECT id, revision_no, rule_hash, rule_json::text AS rules, created_at FROM control.rule_set_revisions "
+                        + "WHERE project_id = ? ORDER BY revision_no DESC LIMIT 1",
+                (rs, n) -> Map.<String, Object>of(
+                        "ruleSetRevisionId", rs.getObject("id", UUID.class).toString(),
+                        "revisionNo", rs.getInt("revision_no"),
+                        "ruleHash", rs.getString("rule_hash").trim(),
+                        "rules", rs.getString("rules"),
+                        "createdAt", String.valueOf(rs.getTimestamp("created_at").toInstant())),
+                projectId).stream().findFirst().orElseThrow(() -> ApiException.notFound("Rule set revision"));
+    }
+
     @GetMapping("/mapping-revisions/{revisionId}")
     public Map<String, Object> getMapping(@PathVariable UUID revisionId, Authentication auth) {
         AppUser actor = SecurityConfig.requireUser(users, auth);
