@@ -65,11 +65,16 @@ public abstract class AbstractIntegrationTest {
                 + "target.customers, target.orders, control.batch_job_execution_params, control.batch_job_execution_context, "
                 + "control.batch_step_execution_context, control.batch_step_execution, control.batch_job_execution, "
                 + "control.batch_job_instance RESTART IDENTITY CASCADE");
-        jdbc.update("UPDATE control.target_cutover_slot SET status = 'FREE', active_run_id = NULL, verified_run_id = NULL WHERE slot_id = 1");
+        // TRUNCATE ... CASCADE above also empties target_cutover_slot (it
+        // references control.runs), so the singleton row must be restored
+        // explicitly - an UPDATE alone would touch zero rows.
+        jdbc.update("INSERT INTO control.target_cutover_slot (slot_id, status, active_run_id, verified_run_id) "
+                + "VALUES (1, 'FREE', NULL, NULL) "
+                + "ON CONFLICT (slot_id) DO UPDATE SET status = 'FREE', active_run_id = NULL, verified_run_id = NULL, updated_at = now()");
     }
 
     protected MockHttpSession login(String email, String password) throws Exception {
-        MvcResult result = mvc.perform(post("/api/v1/auth/login")
+        MvcResult result = mvc.perform(post("/api/v1/auth/login").with(csrf())
                         .contentType(MediaType.APPLICATION_JSON)
                         .content("{\"email\":\"" + email + "\",\"password\":\"" + password + "\"}"))
                 .andExpect(status().isOk())
