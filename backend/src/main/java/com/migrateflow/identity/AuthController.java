@@ -45,8 +45,10 @@ public class AuthController {
     }
 
     public record LoginRequest(@Email @NotBlank String email, @NotBlank String password) {}
-    public record CreateUserRequest(@Email @NotBlank String email, @NotBlank String password,
+    public record CreateUserRequest(@Email @NotBlank String email,
+                                    @NotBlank @jakarta.validation.constraints.Size(min = 8, max = 128, message = "Password must be at least 8 characters") String password,
                                     @NotBlank String displayName, @NotBlank String role) {}
+    public record MembershipRequest(@jakarta.validation.constraints.NotNull(message = "active is required") Boolean active) {}
 
     @GetMapping("/auth/csrf")
     public Map<String, String> csrf(CsrfToken token) {
@@ -59,6 +61,7 @@ public class AuthController {
         try {
             Authentication auth = authManager.authenticate(
                     new UsernamePasswordAuthenticationToken(body.email().toLowerCase(), body.password()));
+            req.changeSessionId();
             SecurityContext context = SecurityContextHolder.createEmptyContext();
             context.setAuthentication(auth);
             SecurityContextHolder.setContext(context);
@@ -103,11 +106,11 @@ public class AuthController {
 
     @PutMapping("/projects/{projectId}/members/{userId}")
     public Map<String, Object> setMembership(@PathVariable UUID projectId, @PathVariable UUID userId,
-                                             @RequestBody Map<String, Object> body, Authentication auth) {
+                                             @Valid @RequestBody MembershipRequest body, Authentication auth) {
         AppUser actor = SecurityConfig.requireUser(users, auth);
         access.requireRole(actor, "ADMIN");
         users.findById(userId).orElseThrow(() -> ApiException.notFound("User"));
-        boolean active = Boolean.TRUE.equals(body.get("active"));
+        boolean active = body.active();
         jdbc.update("INSERT INTO control.project_memberships (id, project_id, user_id, active) VALUES (?,?,?,?) "
                         + "ON CONFLICT (project_id, user_id) DO UPDATE SET active = EXCLUDED.active",
                 UUID.randomUUID(), projectId, userId, active);

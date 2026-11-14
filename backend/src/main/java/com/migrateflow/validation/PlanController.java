@@ -2,6 +2,7 @@ package com.migrateflow.validation;
 
 import com.migrateflow.audit.AuditService;
 import com.migrateflow.common.ApiException;
+import com.migrateflow.common.PageRequestUtil;
 import com.migrateflow.identity.AccessControl;
 import com.migrateflow.identity.AppUser;
 import com.migrateflow.identity.SecurityConfig;
@@ -51,6 +52,7 @@ public class PlanController {
                                                               Authentication auth) {
         AppUser actor = SecurityConfig.requireUser(users, auth);
         access.requireProjectRole(actor, projectId, "ENGINEER");
+        access.requireActiveProject(projectId);
         MappingDefinition def = definition == null
                 ? com.migrateflow.mapping.DefaultMappings.create() : definition;
         MappingService.PublishedRevision published = mappings.publish(actor, projectId, def);
@@ -98,6 +100,7 @@ public class PlanController {
                                                                Authentication auth) {
         AppUser actor = SecurityConfig.requireUser(users, auth);
         access.requireProjectRole(actor, projectId, "ENGINEER");
+        access.requireActiveProject(projectId);
         UUID snapshotId = validation.startValidation(actor, projectId, body.bundleId(), body.mappingRevisionId(), body.ruleSetRevisionId());
         return ResponseEntity.status(HttpStatus.ACCEPTED).body(Map.of(
                 "snapshotId", snapshotId.toString(), "status", "QUEUED"));
@@ -140,13 +143,16 @@ public class PlanController {
                         + "LEFT JOIN stage.customer_input_rows cr ON cr.id = i.source_row_id "
                         + "LEFT JOIN stage.order_input_rows orr ON orr.id = i.source_row_id "
                         + "WHERE i.snapshot_id = ?");
+        int validPage = PageRequestUtil.validatePage(page);
+        int validSize = PageRequestUtil.validateSize(size);
+        int offset = PageRequestUtil.safeOffset(validPage, validSize);
         java.util.List<Object> args = new java.util.ArrayList<>();
         args.add(snapshotId);
         if (kind != null) { sql.append(" AND i.kind = ?"); args.add(kind); }
         if (code != null) { sql.append(" AND i.code = ?"); args.add(code); }
         sql.append(" ORDER BY i.kind, data_row_number, i.code LIMIT ? OFFSET ?");
-        args.add(size);
-        args.add(page * size);
+        args.add(validSize);
+        args.add(offset);
         List<Map<String, Object>> rows = jdbc.query(sql.toString(),
                 (rs, n) -> Map.<String, Object>of(
                         "issueId", rs.getObject("id", UUID.class).toString(),
@@ -158,9 +164,10 @@ public class PlanController {
                         "field", rs.getString("field") == null ? "" : rs.getString("field"),
                         "message", rs.getString("message")),
                 args.toArray());
-        return Map.of("content", rows, "page", page, "size", size);
+        return Map.of("content", rows, "page", validPage, "size", validSize);
     }
 
+    @org.springframework.transaction.annotation.Transactional
     @PostMapping("/validation-snapshots/{snapshotId}/exclusions")
     public ResponseEntity<Map<String, Object>> decideExclusion(@PathVariable UUID snapshotId,
                                                                @Valid @RequestBody ExclusionRequest body,
@@ -168,6 +175,9 @@ public class PlanController {
         AppUser actor = SecurityConfig.requireUser(users, auth);
         UUID projectId = access.projectOfSnapshot(snapshotId);
         access.requireProjectRole(actor, projectId, "REVIEWER");
+        access.requireActiveProject(projectId);
+        // MF-008: Take row lock on validation snapshot to serialize decisions with manifest freeze
+        jdbc.queryForObject("SELECT id FROM control.validation_snapshots WHERE id = ? FOR UPDATE", UUID.class, snapshotId);
         if (!List.of("CUSTOMERS", "ORDERS").contains(body.dataset())) {
             throw ApiException.badRequest("INVALID_DATASET", "dataset must be CUSTOMERS or ORDERS");
         }

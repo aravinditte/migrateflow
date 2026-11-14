@@ -12,7 +12,13 @@ set -euo pipefail
 cd "$(dirname "$0")/.."
 
 PROJECT="${SMOKE_PROJECT:-migrateflow-smoke}"
-BASE="http://localhost:8080"
+if [ "$PROJECT" = "migrateflow" ] && [ "${ALLOW_UNSAFE_PROJECT:-false}" != "true" ]; then
+  echo "FAIL: SMOKE_PROJECT cannot be set to 'migrateflow' without ALLOW_UNSAFE_PROJECT=true"
+  exit 1
+fi
+export FRONTEND_PORT="${SMOKE_FRONTEND_PORT:-18080}"
+export BACKEND_PORT="${SMOKE_BACKEND_PORT:-18081}"
+BASE="http://localhost:$FRONTEND_PORT"
 COMPOSE="docker compose -p $PROJECT"
 CLEANUP_VOLUMES="${SMOKE_CLEANUP_VOLUMES:-true}"
 

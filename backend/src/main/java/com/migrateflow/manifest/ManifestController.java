@@ -40,6 +40,7 @@ public class ManifestController {
                                                       @Valid @RequestBody FreezeRequest body, Authentication auth) {
         AppUser actor = SecurityConfig.requireUser(users, auth);
         access.requireProjectRole(actor, projectId, "ENGINEER");
+        access.requireActiveProject(projectId);
         ManifestService.FreezeResult result = manifests.freeze(actor, projectId, body.bundleId(),
                 body.mappingRevisionId(), body.ruleSetRevisionId(), body.validationSnapshotId());
         return ResponseEntity.status(HttpStatus.CREATED).body(Map.of(

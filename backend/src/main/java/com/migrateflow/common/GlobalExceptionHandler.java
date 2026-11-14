@@ -44,6 +44,26 @@ public class GlobalExceptionHandler {
         return problem(HttpStatus.PAYLOAD_TOO_LARGE, "UPLOAD_TOO_LARGE", "Upload exceeds the configured size limit", req);
     }
 
+    @ExceptionHandler(org.springframework.http.converter.HttpMessageNotReadableException.class)
+    public ResponseEntity<ProblemDetail> malformedJson(org.springframework.http.converter.HttpMessageNotReadableException ex, HttpServletRequest req) {
+        return problem(HttpStatus.BAD_REQUEST, "MALFORMED_JSON", "Malformed request body or unparseable field", req);
+    }
+
+    @ExceptionHandler(org.springframework.web.method.annotation.MethodArgumentTypeMismatchException.class)
+    public ResponseEntity<ProblemDetail> typeMismatch(org.springframework.web.method.annotation.MethodArgumentTypeMismatchException ex, HttpServletRequest req) {
+        return problem(HttpStatus.BAD_REQUEST, "INVALID_ARGUMENT", "Invalid argument type for parameter " + ex.getName(), req);
+    }
+
+    @ExceptionHandler(org.springframework.web.bind.MissingServletRequestParameterException.class)
+    public ResponseEntity<ProblemDetail> missingParam(org.springframework.web.bind.MissingServletRequestParameterException ex, HttpServletRequest req) {
+        return problem(HttpStatus.BAD_REQUEST, "MISSING_PARAMETER", "Required parameter missing: " + ex.getParameterName(), req);
+    }
+
+    @ExceptionHandler({IllegalArgumentException.class, java.time.format.DateTimeParseException.class})
+    public ResponseEntity<ProblemDetail> badArgument(Exception ex, HttpServletRequest req) {
+        return problem(HttpStatus.BAD_REQUEST, "INVALID_ARGUMENT", ex.getMessage(), req);
+    }
+
     @ExceptionHandler(Exception.class)
     public ResponseEntity<ProblemDetail> unexpected(Exception ex, HttpServletRequest req) {
         String correlationId = UUID.randomUUID().toString();

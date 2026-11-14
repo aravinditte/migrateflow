@@ -5,13 +5,16 @@ import { Issue } from './Validation';
 
 export default function Exceptions({ flow, setError }: { flow: FlowContext; setError: (e: string) => void }) {
   const [issues, setIssues] = useState<Issue[]>([]);
+  const [page, setPage] = useState(0);
+  const [hasMore, setHasMore] = useState(false);
   const [reason, setReason] = useState('Confirmed against the source export; row is intentionally omitted');
   const [decided, setDecided] = useState<Record<string, string>>({});
   const load = useCallback(async () => {
     if (!flow.snapshotId) return;
-    const page = await api.get<Page<Issue>>(`/api/v1/validation-snapshots/${flow.snapshotId}/issues?size=200`);
-    setIssues(page.content);
-  }, [flow.snapshotId]);
+    const res = await api.get<Page<Issue>>(`/api/v1/validation-snapshots/${flow.snapshotId}/issues?page=${page}&size=50`);
+    setIssues(res.content);
+    setHasMore(res.content.length === 50);
+  }, [flow.snapshotId, page]);
   useEffect(() => { load().catch((e) => setError(message(e))); }, [load, setError]);
 
   const invalidRows = new Map<string, Issue[]>();
@@ -42,6 +45,11 @@ export default function Exceptions({ flow, setError }: { flow: FlowContext; setE
               ? <span className="badge ok">EXCLUDE approved</span>
               : <button onClick={() => decide(rowIssues[0].kind, rowIssues[0].sourceRowId)}>Approve exclusion</button>}</td></tr>
         ))}</tbody></table>
+      <div style={{ marginTop: '1rem', display: 'flex', gap: '0.5rem', alignItems: 'center' }}>
+        <button disabled={page === 0} onClick={() => setPage((p) => Math.max(0, p - 1))}>Previous</button>
+        <span>Page {page + 1}</span>
+        <button disabled={!hasMore} onClick={() => setPage((p) => p + 1)}>Next</button>
+      </div>
     </div>
   );
 }

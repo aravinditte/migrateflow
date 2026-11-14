@@ -2,6 +2,7 @@ package com.migrateflow.project;
 
 import com.migrateflow.audit.AuditService;
 import com.migrateflow.common.ApiException;
+import com.migrateflow.common.PageRequestUtil;
 import com.migrateflow.identity.AccessControl;
 import com.migrateflow.identity.AppUser;
 import com.migrateflow.identity.SecurityConfig;
@@ -35,6 +36,7 @@ public class ProjectController {
 
     public record CreateProjectRequest(@NotBlank String name, String description, String windowNote) {}
 
+    @org.springframework.transaction.annotation.Transactional
     @PostMapping
     public ResponseEntity<Map<String, Object>> create(@Valid @RequestBody CreateProjectRequest body, Authentication auth) {
         AppUser actor = SecurityConfig.requireUser(users, auth);
@@ -52,17 +54,20 @@ public class ProjectController {
     public Map<String, Object> list(@RequestParam(defaultValue = "0") int page,
                                     @RequestParam(defaultValue = "20") int size, Authentication auth) {
         AppUser actor = SecurityConfig.requireUser(users, auth);
+        int validPage = PageRequestUtil.validatePage(page);
+        int validSize = PageRequestUtil.validateSize(size);
+        int offset = PageRequestUtil.safeOffset(validPage, validSize);
         List<Map<String, Object>> rows;
         if (actor.isAdmin()) {
             rows = jdbc.query("SELECT * FROM control.projects ORDER BY created_at DESC LIMIT ? OFFSET ?",
-                    this::projectRow, size, page * size);
+                    this::projectRow, validSize, offset);
         } else {
             rows = jdbc.query("SELECT p.* FROM control.projects p JOIN control.project_memberships m "
                             + "ON m.project_id = p.id AND m.user_id = ? AND m.active = TRUE "
                             + "ORDER BY p.created_at DESC LIMIT ? OFFSET ?",
-                    this::projectRow, actor.id(), size, page * size);
+                    this::projectRow, actor.id(), validSize, offset);
         }
-        return Map.of("content", rows, "page", page, "size", size);
+        return Map.of("content", rows, "page", validPage, "size", validSize);
     }
 
     @GetMapping("/{projectId}")
@@ -75,28 +80,65 @@ public class ProjectController {
 
     /**
      * Workflow restoration (spec 11): returns the latest workflow stage IDs
-     * for this project so the frontend workspace state can be restored on
-     * page refresh or project reopening instead of resetting to empty.
+     * for this project derived from a coherent plan lineage so the frontend
+     * workspace state can be restored on page refresh or project reopening.
      */
     @GetMapping("/{projectId}/workflow")
     public Map<String, Object> getWorkflow(@PathVariable UUID projectId, Authentication auth) {
         AppUser actor = SecurityConfig.requireUser(users, auth);
         access.requireMembership(actor, projectId);
 
-        UUID bundleId = querySingleId("SELECT id FROM control.dataset_bundles WHERE project_id = ? ORDER BY created_at DESC LIMIT 1", projectId);
-        UUID mappingRevisionId = querySingleId("SELECT id FROM control.mapping_revisions WHERE project_id = ? ORDER BY revision_no DESC LIMIT 1", projectId);
-        UUID ruleSetRevisionId = querySingleId("SELECT id FROM control.rule_set_revisions WHERE project_id = ? ORDER BY revision_no DESC LIMIT 1", projectId);
-        UUID snapshotId = querySingleId("SELECT id FROM control.validation_snapshots WHERE project_id = ? ORDER BY created_at DESC LIMIT 1", projectId);
+        // 1. Look for the active FROZEN manifest for this project
+        List<Map<String, Object>> frozenManifests = jdbc.queryForList(
+                "SELECT id, bundle_id, mapping_revision_id, rule_set_revision_id, snapshot_id, manifest_hash "
+                        + "FROM control.manifests WHERE project_id = ? AND status = 'FROZEN' ORDER BY created_at DESC LIMIT 1",
+                projectId);
 
-        List<Map<String, Object>> manifestRows = jdbc.queryForList(
-                "SELECT id, manifest_hash FROM control.manifests WHERE project_id = ? ORDER BY (CASE WHEN status = 'FROZEN' THEN 1 ELSE 2 END), created_at DESC LIMIT 1", projectId);
-        UUID manifestId = manifestRows.isEmpty() ? null : (UUID) manifestRows.get(0).get("id");
-        String manifestHash = manifestRows.isEmpty() ? "" : (String) manifestRows.get(0).get("manifest_hash");
+        UUID bundleId;
+        UUID mappingRevisionId;
+        UUID ruleSetRevisionId;
+        UUID snapshotId;
+        UUID manifestId;
+        String manifestHash;
+        UUID rehearsalRunId = null;
+        UUID approvalId = null;
+        UUID cutoverRunId = null;
 
-        UUID rehearsalRunId = querySingleId("SELECT id FROM control.runs WHERE project_id = ? AND kind = 'REHEARSAL' ORDER BY created_at DESC LIMIT 1", projectId);
-        UUID approvalId = manifestId == null ? null : querySingleId(
-                "SELECT id FROM control.approvals WHERE manifest_id = ? AND decision = 'APPROVED' ORDER BY signed_at DESC LIMIT 1", manifestId);
-        UUID cutoverRunId = querySingleId("SELECT id FROM control.runs WHERE project_id = ? AND kind = 'CUTOVER' ORDER BY created_at DESC LIMIT 1", projectId);
+        if (!frozenManifests.isEmpty()) {
+            Map<String, Object> m = frozenManifests.get(0);
+            manifestId = (UUID) m.get("id");
+            manifestHash = (String) m.get("manifest_hash");
+            bundleId = (UUID) m.get("bundle_id");
+            mappingRevisionId = (UUID) m.get("mapping_revision_id");
+            ruleSetRevisionId = (UUID) m.get("rule_set_revision_id");
+            snapshotId = (UUID) m.get("snapshot_id");
+
+            rehearsalRunId = querySingleId(
+                    "SELECT id FROM control.runs WHERE manifest_id = ? AND kind = 'REHEARSAL' ORDER BY created_at DESC LIMIT 1", manifestId);
+            approvalId = querySingleId(
+                    "SELECT id FROM control.approvals WHERE manifest_id = ? AND decision = 'APPROVED' ORDER BY signed_at DESC LIMIT 1", manifestId);
+            cutoverRunId = querySingleId(
+                    "SELECT id FROM control.runs WHERE manifest_id = ? AND kind = 'CUTOVER' ORDER BY created_at DESC LIMIT 1", manifestId);
+        } else {
+            manifestId = null;
+            manifestHash = "";
+            List<Map<String, Object>> latestSnapshots = jdbc.queryForList(
+                    "SELECT id, bundle_id, mapping_revision_id, rule_set_revision_id FROM control.validation_snapshots "
+                            + "WHERE project_id = ? ORDER BY (CASE WHEN status = 'COMPLETED' THEN 1 ELSE 2 END), created_at DESC LIMIT 1",
+                    projectId);
+            if (!latestSnapshots.isEmpty()) {
+                Map<String, Object> s = latestSnapshots.get(0);
+                snapshotId = (UUID) s.get("id");
+                bundleId = (UUID) s.get("bundle_id");
+                mappingRevisionId = (UUID) s.get("mapping_revision_id");
+                ruleSetRevisionId = (UUID) s.get("rule_set_revision_id");
+            } else {
+                snapshotId = null;
+                bundleId = querySingleId("SELECT id FROM control.dataset_bundles WHERE project_id = ? ORDER BY created_at DESC LIMIT 1", projectId);
+                mappingRevisionId = querySingleId("SELECT id FROM control.mapping_revisions WHERE project_id = ? ORDER BY revision_no DESC LIMIT 1", projectId);
+                ruleSetRevisionId = querySingleId("SELECT id FROM control.rule_set_revisions WHERE project_id = ? ORDER BY revision_no DESC LIMIT 1", projectId);
+            }
+        }
 
         Map<String, Object> flow = new java.util.LinkedHashMap<>();
         flow.put("bundleId", bundleId == null ? "" : bundleId.toString());
@@ -116,6 +158,7 @@ public class ProjectController {
         return list.isEmpty() ? null : list.get(0);
     }
 
+    @org.springframework.transaction.annotation.Transactional
     @PostMapping("/{projectId}/archive")
     public Map<String, Object> archive(@PathVariable UUID projectId, Authentication auth) {
         AppUser actor = SecurityConfig.requireUser(users, auth);
@@ -136,6 +179,9 @@ public class ProjectController {
                                            @RequestParam(defaultValue = "50") int size, Authentication auth) {
         AppUser actor = SecurityConfig.requireUser(users, auth);
         access.requireMembership(actor, projectId);
+        int validPage = PageRequestUtil.validatePage(page);
+        int validSize = PageRequestUtil.validateSize(size);
+        int offset = PageRequestUtil.safeOffset(validPage, validSize);
         List<Map<String, Object>> rows = jdbc.query(
                 "SELECT a.*, u.email AS actor_email FROM control.audit_events a LEFT JOIN control.users u ON u.id = a.actor_id "
                         + "WHERE a.project_id = ? ORDER BY a.occurred_at DESC LIMIT ? OFFSET ?",
@@ -147,8 +193,8 @@ public class ProjectController {
                         "entityId", rs.getObject("entity_id", UUID.class) == null ? "" : rs.getObject("entity_id", UUID.class).toString(),
                         "metadata", rs.getString("metadata_json") == null ? "" : rs.getString("metadata_json"),
                         "occurredAt", String.valueOf(rs.getTimestamp("occurred_at").toInstant())),
-                projectId, size, page * size);
-        return Map.of("content", rows, "page", page, "size", size);
+                projectId, validSize, offset);
+        return Map.of("content", rows, "page", validPage, "size", validSize);
     }
 
     private Map<String, Object> projectRow(java.sql.ResultSet rs, int n) throws java.sql.SQLException {

@@ -57,17 +57,37 @@ public class RunRecovery implements ApplicationRunner {
     /** Returns how many stale runs were recovered. Callable from tests. */
     public int recoverStaleRuns() {
         int recovered = 0;
+        // MF-007: Recover stale validation snapshots
+        int staleSnapshots = jdbc.update(
+                "UPDATE control.validation_snapshots SET status = 'FAILED' "
+                        + "WHERE status IN ('RUNNING', 'QUEUED')");
+        if (staleSnapshots > 0) {
+            recovered += staleSnapshots;
+            log.warn("Marked {} stale validation snapshot(s) as FAILED at startup", staleSnapshots);
+        }
+
+        // MF-015: For runs left RUNNING or BATCH_COMPLETED:
         for (Map<String, Object> run : jdbc.queryForList(
-                "SELECT id FROM control.runs WHERE status = 'RUNNING'")) {
+                "SELECT id, status, batch_job_execution_id FROM control.runs WHERE status IN ('RUNNING', 'BATCH_COMPLETED')")) {
             UUID runId = (UUID) run.get("id");
-            failStaleExecutions(runId);
-            int updated = jdbc.update(
-                    "UPDATE control.runs SET status = 'FAILED_RESTARTABLE', finished_at = now(), "
-                            + "error_message = 'Recovered at startup: the previous process terminated during execution' "
-                            + "WHERE id = ? AND status = 'RUNNING'", runId);
-            if (updated > 0) {
+            Long executionId = (Long) run.get("batch_job_execution_id");
+            JobExecution jobExecution = executionId == null ? null : jobExplorer.getJobExecution(executionId);
+
+            if (jobExecution != null && jobExecution.getStatus() == BatchStatus.COMPLETED) {
+                // Batch job actually completed before process died; complete finalization!
+                log.warn("Run {} batch job was COMPLETED before crash; finalizing at startup", runId);
+                runs.finalizeCompletedRun(runId);
                 recovered++;
-                log.warn("Run {} was RUNNING at startup; marked FAILED_RESTARTABLE for same-identity restart", runId);
+            } else {
+                failStaleExecutions(runId);
+                int updated = jdbc.update(
+                        "UPDATE control.runs SET status = 'FAILED_RESTARTABLE', finished_at = now(), "
+                                + "error_message = 'Recovered at startup: the previous process terminated during execution' "
+                                + "WHERE id = ? AND status IN ('RUNNING', 'BATCH_COMPLETED')", runId);
+                if (updated > 0) {
+                    recovered++;
+                    log.warn("Run {} was marked FAILED_RESTARTABLE for same-identity restart", runId);
+                }
             }
         }
         for (Map<String, Object> run : jdbc.queryForList(
@@ -86,11 +106,14 @@ public class RunRecovery implements ApplicationRunner {
                 if (!runId.toString().equals(execution.getJobParameters().getString("runId"))) {
                     continue;
                 }
+                // MF-015: Keep COMPLETED steps COMPLETED; only fail active steps!
                 execution.getStepExecutions().forEach(step -> {
-                    step.setStatus(BatchStatus.FAILED);
-                    step.setExitStatus(ExitStatus.FAILED);
-                    step.setEndTime(LocalDateTime.now());
-                    jobRepository.update(step);
+                    if (step.getStatus() == BatchStatus.STARTED || step.getStatus() == BatchStatus.STARTING) {
+                        step.setStatus(BatchStatus.FAILED);
+                        step.setExitStatus(ExitStatus.FAILED);
+                        step.setEndTime(LocalDateTime.now());
+                        jobRepository.update(step);
+                    }
                 });
                 execution.setStatus(BatchStatus.FAILED);
                 execution.setExitStatus(ExitStatus.FAILED);

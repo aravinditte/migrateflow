@@ -87,7 +87,11 @@ public class SecurityConfig {
         if (auth == null || !auth.isAuthenticated() || "anonymousUser".equals(auth.getName())) {
             throw new ApiException(HttpStatus.UNAUTHORIZED, "UNAUTHENTICATED", "A valid session is required");
         }
-        return users.findByEmail(auth.getName())
+        AppUser user = users.findByEmail(auth.getName())
                 .orElseThrow(() -> new ApiException(HttpStatus.UNAUTHORIZED, "UNAUTHENTICATED", "A valid session is required"));
+        if (!user.enabled()) {
+            throw new ApiException(HttpStatus.UNAUTHORIZED, "USER_DISABLED", "User account is disabled");
+        }
+        return user;
     }
 }

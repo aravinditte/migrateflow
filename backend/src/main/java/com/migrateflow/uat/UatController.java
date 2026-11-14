@@ -56,6 +56,7 @@ public class UatController {
         AppUser actor = SecurityConfig.requireUser(users, auth);
         UUID projectId = access.projectOfRun(runId);
         access.requireProjectRole(actor, projectId, "REVIEWER");
+        access.requireActiveProject(projectId);
         if (!List.of("PASS", "FAIL", "BLOCKED").contains(body.result())) {
             throw ApiException.badRequest("INVALID_RESULT", "result must be PASS, FAIL or BLOCKED");
         }
@@ -77,6 +78,7 @@ public class UatController {
         AppUser actor = SecurityConfig.requireUser(users, auth);
         UUID projectId = access.projectOfRun(runId);
         access.requireProjectRole(actor, projectId, "REVIEWER");
+        access.requireActiveProject(projectId);
         if (!List.of("BLOCKER", "CRITICAL", "MAJOR", "MINOR").contains(body.severity())) {
             throw ApiException.badRequest("INVALID_SEVERITY", "Unknown severity " + body.severity());
         }
@@ -103,6 +105,7 @@ public class UatController {
         UUID runId = (UUID) defect.get("rehearsal_run_id");
         UUID projectId = access.projectOfRun(runId);
         access.requireProjectRole(actor, projectId, "REVIEWER");
+        access.requireActiveProject(projectId);
         String target = body.status();
         if (!List.of("RESOLVED", "CLOSED").contains(target)) {
             throw ApiException.badRequest("INVALID_STATUS", "Defect can only move to RESOLVED or CLOSED");
@@ -120,12 +123,13 @@ public class UatController {
             }
             UUID caseId = (UUID) defect.get("uat_case_id");
             if (caseId != null) {
-                Long passes = jdbc.queryForObject(
-                        "SELECT count(*) FROM control.uat_executions WHERE case_id = ? AND result = 'PASS' AND executed_at >= ?",
-                        Long.class, caseId, defect.get("resolved_at"));
-                if (passes == null || passes == 0) {
+                List<String> latest = jdbc.query(
+                        "SELECT result FROM control.uat_executions WHERE case_id = ? AND executed_at >= ? "
+                                + "ORDER BY executed_at DESC, created_at DESC, id DESC LIMIT 1",
+                        (rs, n) -> rs.getString("result"), caseId, defect.get("resolved_at"));
+                if (latest.isEmpty() || !"PASS".equals(latest.get(0))) {
                     throw ApiException.conflict("RETEST_REQUIRED",
-                            "A passing retest after resolution is required before closing this defect");
+                            "The latest retest after resolution must be PASS before closing this defect");
                 }
             }
             jdbc.update("UPDATE control.defects SET status = 'CLOSED' WHERE id = ?", defectId);

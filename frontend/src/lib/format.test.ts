@@ -25,4 +25,16 @@ describe('format helpers', () => {
     expect(result).toBe(3);
     expect(calls).toBe(3);
   });
+
+  it('pollUntil throws TimeoutError when attempts expire without match', async () => {
+    await expect(
+      pollUntil(
+        async () => 'PENDING',
+        (v) => v === 'COMPLETED',
+        3,
+        0,
+        async () => undefined,
+      ),
+    ).rejects.toThrow('Operation did not complete');
+  });
 });

@@ -53,8 +53,9 @@ the proxy, verify the SPA and a demo login, then tear everything down.
 
 - **Backend restarted mid-run** — at startup, runs left `RUNNING` by the
   dead process are recovered automatically: their stale batch executions
-  are abandoned and the runs become `FAILED_RESTARTABLE`, ready for the
-  normal restart below. Runs left `QUEUED` are executed.
+  are marked `FAILED` (preserving completed checkpoints) and the runs become
+  `FAILED_RESTARTABLE`, ready for same-instance restart. Stale `QUEUED` runs
+  are executed. Stale `RUNNING` validation snapshots are marked `FAILED`.
 - **Run FAILED_RESTARTABLE** — fix the cause, then `POST /runs/{id}/restart`.
   The same run identity resumes; already-applied rows are recognised via the
   ledger and skipped. A restart never creates a second run row.

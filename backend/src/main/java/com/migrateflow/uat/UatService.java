@@ -40,7 +40,7 @@ public class UatService {
     public List<CaseView> cases(UUID rehearsalRunId) {
         return jdbc.query(
                 "SELECT c.id, c.case_key, c.title, c.expected_result, c.required, "
-                        + "(SELECT e.result FROM control.uat_executions e WHERE e.case_id = c.id ORDER BY e.executed_at DESC, e.created_at DESC LIMIT 1) AS latest_result "
+                        + "(SELECT e.result FROM control.uat_executions e WHERE e.case_id = c.id ORDER BY e.executed_at DESC, e.created_at DESC, e.id DESC LIMIT 1) AS latest_result "
                         + "FROM control.uat_cases c WHERE c.rehearsal_run_id = ? ORDER BY c.case_key",
                 (rs, n) -> new CaseView(rs.getObject("id", UUID.class), rs.getString("case_key"),
                         rs.getString("title"), rs.getString("expected_result"), rs.getBoolean("required"),
@@ -55,8 +55,8 @@ public class UatService {
         return jdbc.query(
                 "SELECT d.id, d.uat_case_id, c.case_key, d.severity, d.status, d.description, d.resolution_note, d.resolved_at, "
                         + "(d.uat_case_id IS NOT NULL) AS retest_required, "
-                        + "EXISTS (SELECT 1 FROM control.uat_executions e WHERE e.case_id = d.uat_case_id "
-                        + "AND e.result = 'PASS' AND d.resolved_at IS NOT NULL AND e.executed_at >= d.resolved_at) AS retest_passed "
+                        + "EXISTS (SELECT 1 FROM (SELECT e.result FROM control.uat_executions e WHERE e.case_id = d.uat_case_id "
+                        + "AND d.resolved_at IS NOT NULL AND e.executed_at >= d.resolved_at ORDER BY e.executed_at DESC, e.created_at DESC, e.id DESC LIMIT 1) latest_e WHERE latest_e.result = 'PASS') AS retest_passed "
                         + "FROM control.defects d LEFT JOIN control.uat_cases c ON c.id = d.uat_case_id "
                         + "WHERE d.rehearsal_run_id = ? ORDER BY d.created_at",
                 (rs, n) -> Map.<String, Object>of(
@@ -77,16 +77,17 @@ public class UatService {
     public String uatEvidenceHash(UUID rehearsalRunId) {
         List<String> lines = new ArrayList<>();
         jdbc.query("SELECT c.case_key, "
-                        + "(SELECT e.result || '|' || e.executed_by || '|' || to_char(e.executed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') FROM control.uat_executions e "
-                        + " WHERE e.case_id = c.id ORDER BY e.executed_at DESC, e.created_at DESC LIMIT 1) AS latest "
+                        + "(SELECT e.id || '|' || e.result || '|' || e.executed_by || '|' || to_char(e.executed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') || '|' || COALESCE(e.actual_result,'') FROM control.uat_executions e "
+                        + " WHERE e.case_id = c.id ORDER BY e.executed_at DESC, e.created_at DESC, e.id DESC LIMIT 1) AS latest "
                         + "FROM control.uat_cases c WHERE c.rehearsal_run_id = ? ORDER BY c.case_key",
                 (rs, n) -> {
                     lines.add(rs.getString("case_key") + "=" + rs.getString("latest"));
                     return null;
                 }, rehearsalRunId);
-        jdbc.query("SELECT id, severity, status FROM control.defects WHERE rehearsal_run_id = ? ORDER BY id",
+        jdbc.query("SELECT id, severity, status, description, COALESCE(resolution_note,'') AS res_note FROM control.defects WHERE rehearsal_run_id = ? ORDER BY id",
                 (rs, n) -> {
-                    lines.add("defect:" + rs.getObject("id", UUID.class) + "=" + rs.getString("severity") + ":" + rs.getString("status"));
+                    lines.add("defect:" + rs.getObject("id", UUID.class) + "=" + rs.getString("severity") + ":" + rs.getString("status")
+                            + ":" + rs.getString("description") + ":" + rs.getString("res_note"));
                     return null;
                 }, rehearsalRunId);
         return CanonicalHash.sha256Hex(String.join("\n", lines));
@@ -94,9 +95,20 @@ public class UatService {
 
     /** Approval gate: required cases all PASS, no unclosed blocking defect. Returns a blocker or null. */
     public String approvalBlocker(UUID rehearsalRunId) {
-        for (CaseView c : cases(rehearsalRunId)) {
+        List<CaseView> casesList = cases(rehearsalRunId);
+        if (casesList.isEmpty()) {
+            return "No UAT cases exist for this rehearsal";
+        }
+        Set<String> existingKeys = new HashSet<>();
+        for (CaseView c : casesList) {
+            existingKeys.add(c.caseKey());
             if (c.required() && !"PASS".equals(c.latestResult())) {
                 return "Required UAT case " + c.caseKey() + " has not passed (latest: " + c.latestResult() + ")";
+            }
+        }
+        for (String[] defCase : DEFAULT_CASES) {
+            if (!existingKeys.contains(defCase[0])) {
+                return "Required UAT case " + defCase[0] + " is missing";
             }
         }
         Long open = jdbc.queryForObject(

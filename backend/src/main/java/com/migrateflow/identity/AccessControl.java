@@ -47,6 +47,15 @@ public class AccessControl {
         requireRole(user, roles);
     }
 
+    public void requireActiveProject(UUID projectId) {
+        String status = jdbc.query("SELECT status FROM control.projects WHERE id = ?",
+                (rs, n) -> rs.getString("status"), projectId).stream().findFirst()
+                .orElseThrow(() -> ApiException.notFound("Project"));
+        if ("ARCHIVED".equalsIgnoreCase(status)) {
+            throw ApiException.conflict("PROJECT_ARCHIVED", "Project is archived and cannot be modified");
+        }
+    }
+
     public UUID projectOfBundle(UUID bundleId) {
         return jdbc.query("SELECT project_id FROM control.dataset_bundles WHERE id = ?",
                 (rs, n) -> rs.getObject("project_id", UUID.class), bundleId)

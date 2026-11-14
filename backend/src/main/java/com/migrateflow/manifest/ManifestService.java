@@ -27,6 +27,11 @@ public class ManifestService {
     @Transactional
     public FreezeResult freeze(AppUser actor, UUID projectId, UUID bundleId, UUID mappingRevisionId,
                                UUID ruleSetRevisionId, UUID snapshotId) {
+        // MF-009: Serialize concurrent freezes per project
+        jdbc.queryForObject("SELECT id FROM control.projects WHERE id = ? FOR UPDATE", UUID.class, projectId);
+        // MF-008: Lock validation snapshot to serialize with concurrent exclusion decisions
+        jdbc.queryForObject("SELECT id FROM control.validation_snapshots WHERE id = ? FOR UPDATE", UUID.class, snapshotId);
+
         Map<String, Object> snapshot = jdbc.queryForMap(
                 "SELECT project_id, bundle_id, mapping_revision_id, rule_set_revision_id, status "
                         + "FROM control.validation_snapshots WHERE id = ?", snapshotId);

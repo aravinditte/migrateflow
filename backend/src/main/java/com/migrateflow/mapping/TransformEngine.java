@@ -29,7 +29,13 @@ public final class TransformEngine {
 
     /** Validates step arguments at mapping-publish time. Returns an error message or null. */
     public static String validateStep(MappingDefinition.TransformStep step) {
-        if (!OPERATIONS.contains(step.operation())) return "Unknown transformation: " + step.operation();
+        if (step == null) return "Transform step cannot be null";
+        if (step.operation() == null || !OPERATIONS.contains(step.operation())) {
+            return "Unknown transformation: " + (step.operation() == null ? "null" : step.operation());
+        }
+        if (step.args() == null && (step.operation().equals("PARSE_DATE") || step.operation().equals("ENUM_MAP") || step.operation().equals("DEFAULT_VALUE"))) {
+            return step.operation() + " requires arguments";
+        }
         switch (step.operation()) {
             case "PARSE_DATE" -> {
                 String pattern = step.args().get("pattern");
@@ -52,8 +58,10 @@ public final class TransformEngine {
     }
 
     public static Result apply(List<MappingDefinition.TransformStep> steps, String raw) {
+        if (steps == null) return Result.ok(raw);
         String value = raw;
         for (MappingDefinition.TransformStep step : steps) {
+            if (step == null || step.operation() == null) continue;
             if (value == null && !"DEFAULT_VALUE".equals(step.operation())) continue;
             switch (step.operation()) {
                 case "TRIM" -> value = value.trim();

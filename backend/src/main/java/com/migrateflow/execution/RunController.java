@@ -2,6 +2,7 @@ package com.migrateflow.execution;
 
 import com.migrateflow.common.ApiException;
 import com.migrateflow.common.CsvEscaping;
+import com.migrateflow.common.PageRequestUtil;
 import com.migrateflow.identity.AccessControl;
 import com.migrateflow.identity.AppUser;
 import com.migrateflow.identity.SecurityConfig;
@@ -40,7 +41,9 @@ public class RunController {
     @PostMapping("/manifests/{manifestId}/rehearsals")
     public ResponseEntity<Map<String, Object>> launchRehearsal(@PathVariable UUID manifestId, Authentication auth) {
         AppUser actor = SecurityConfig.requireUser(users, auth);
-        access.requireProjectRole(actor, access.projectOfManifest(manifestId), "ENGINEER");
+        UUID projectId = access.projectOfManifest(manifestId);
+        access.requireProjectRole(actor, projectId, "ENGINEER");
+        access.requireActiveProject(projectId);
         UUID runId = runs.launchRehearsal(actor, manifestId);
         return ResponseEntity.status(HttpStatus.ACCEPTED).body(Map.of(
                 "runId", runId.toString(), "kind", "REHEARSAL", "status", "QUEUED"));
@@ -51,7 +54,9 @@ public class RunController {
                                                              @RequestHeader(value = "Idempotency-Key", required = false) String idempotencyKey,
                                                              @Valid @RequestBody CutoverRequest body, Authentication auth) {
         AppUser actor = SecurityConfig.requireUser(users, auth);
-        access.requireProjectRole(actor, access.projectOfManifest(manifestId), "ENGINEER");
+        UUID projectId = access.projectOfManifest(manifestId);
+        access.requireProjectRole(actor, projectId, "ENGINEER");
+        access.requireActiveProject(projectId);
         UUID runId = runs.launchCutover(actor, manifestId, body.approvalId(), idempotencyKey);
         return ResponseEntity.status(HttpStatus.ACCEPTED).body(Map.of(
                 "runId", runId.toString(), "kind", "CUTOVER", "status", "QUEUED"));
@@ -67,7 +72,9 @@ public class RunController {
     @PostMapping("/runs/{runId}/restart")
     public ResponseEntity<Map<String, Object>> restart(@PathVariable UUID runId, Authentication auth) {
         AppUser actor = SecurityConfig.requireUser(users, auth);
-        access.requireProjectRole(actor, access.projectOfRun(runId), "ENGINEER");
+        UUID projectId = access.projectOfRun(runId);
+        access.requireProjectRole(actor, projectId, "ENGINEER");
+        access.requireActiveProject(projectId);
         runs.restart(actor, runId);
         return ResponseEntity.status(HttpStatus.ACCEPTED).body(Map.of(
                 "runId", runId.toString(), "status", "QUEUED"));
@@ -96,13 +103,16 @@ public class RunController {
                                                   @RequestParam(defaultValue = "50") int size, Authentication auth) {
         AppUser actor = SecurityConfig.requireUser(users, auth);
         access.requireMembership(actor, access.projectOfRun(runId));
+        int validPage = PageRequestUtil.validatePage(page);
+        int validSize = PageRequestUtil.validateSize(size);
+        int offset = PageRequestUtil.safeOffset(validPage, validSize);
         String sql = "SELECT id, external_customer_id, full_name, email, joined_on, source_row_number "
                 + "FROM rehearsal.customers WHERE rehearsal_run_id = ?"
                 + (q == null || q.isBlank() ? "" : " AND external_customer_id LIKE ?")
                 + " ORDER BY external_customer_id LIMIT ? OFFSET ?";
         Object[] args = q == null || q.isBlank()
-                ? new Object[]{runId, size, page * size}
-                : new Object[]{runId, "%" + q.toUpperCase() + "%", size, page * size};
+                ? new Object[]{runId, validSize, offset}
+                : new Object[]{runId, "%" + q.toUpperCase() + "%", validSize, offset};
         List<Map<String, Object>> rows = jdbc.query(sql,
                 (rs, n) -> Map.<String, Object>of(
                         "id", rs.getObject("id", UUID.class).toString(),
@@ -112,7 +122,7 @@ public class RunController {
                         "joinedOn", rs.getDate("joined_on") == null ? "" : rs.getDate("joined_on").toString(),
                         "sourceRowNumber", rs.getInt("source_row_number")),
                 args);
-        return Map.of("content", rows, "page", page, "size", size);
+        return Map.of("content", rows, "page", validPage, "size", validSize);
     }
 
     @GetMapping("/rehearsals/{runId}/orders")
@@ -122,14 +132,17 @@ public class RunController {
                                                @RequestParam(defaultValue = "50") int size, Authentication auth) {
         AppUser actor = SecurityConfig.requireUser(users, auth);
         access.requireMembership(actor, access.projectOfRun(runId));
+        int validPage = PageRequestUtil.validatePage(page);
+        int validSize = PageRequestUtil.validateSize(size);
+        int offset = PageRequestUtil.safeOffset(validPage, validSize);
         String sql = "SELECT o.id, o.external_order_id, c.external_customer_id, o.order_date, o.amount_yen, o.status, o.source_row_number "
                 + "FROM rehearsal.orders o JOIN rehearsal.customers c "
                 + "ON c.rehearsal_run_id = o.rehearsal_run_id AND c.id = o.customer_id WHERE o.rehearsal_run_id = ?"
                 + (q == null || q.isBlank() ? "" : " AND o.external_order_id LIKE ?")
                 + " ORDER BY o.external_order_id LIMIT ? OFFSET ?";
         Object[] args = q == null || q.isBlank()
-                ? new Object[]{runId, size, page * size}
-                : new Object[]{runId, "%" + q.toUpperCase() + "%", size, page * size};
+                ? new Object[]{runId, validSize, offset}
+                : new Object[]{runId, "%" + q.toUpperCase() + "%", validSize, offset};
         List<Map<String, Object>> rows = jdbc.query(sql,
                 (rs, n) -> Map.<String, Object>of(
                         "id", rs.getObject("id", UUID.class).toString(),
@@ -140,7 +153,7 @@ public class RunController {
                         "status", rs.getString("status"),
                         "sourceRowNumber", rs.getInt("source_row_number")),
                 args);
-        return Map.of("content", rows, "page", page, "size", size);
+        return Map.of("content", rows, "page", validPage, "size", validSize);
     }
 
     /** Downloadable evidence: JSON by default, escaped CSV with format=csv. */

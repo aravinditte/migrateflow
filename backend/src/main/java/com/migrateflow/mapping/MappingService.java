@@ -39,12 +39,17 @@ public class MappingService {
             Set.of("external_customer_id", "full_name", "email", "joined_on");
     private static final Set<String> ORDER_FIELDS =
             Set.of("external_order_id", "external_customer_id", "order_date", "amount_yen", "status");
+    private static final Set<String> MANDATORY_CUSTOMER_FIELDS =
+            Set.of("external_customer_id", "full_name");
+    private static final Set<String> MANDATORY_ORDER_FIELDS =
+            Set.of("external_order_id", "external_customer_id", "order_date", "amount_yen", "status");
 
     public record PublishedRevision(UUID revisionId, int revisionNo, String definitionHash, String canonicalJson) {}
 
     @Transactional
     public PublishedRevision publish(AppUser actor, UUID projectId, MappingDefinition definition) {
         validateDefinition(definition);
+        jdbc.queryForObject("SELECT id FROM control.projects WHERE id = ? FOR UPDATE", UUID.class, projectId);
         String canonical;
         try {
             canonical = canonicalMapper.writeValueAsString(definition);
@@ -68,6 +73,7 @@ public class MappingService {
     /** The rule set is a fixed v1 policy in this implementation; publishing is explicit and hashed. */
     @Transactional
     public UUID ensureDefaultRuleSet(UUID projectId) {
+        jdbc.queryForObject("SELECT id FROM control.projects WHERE id = ? FOR UPDATE", UUID.class, projectId);
         List<UUID> existing = jdbc.query(
                 "SELECT id FROM control.rule_set_revisions WHERE project_id = ? ORDER BY revision_no LIMIT 1",
                 (rs, n) -> rs.getObject("id", UUID.class), projectId);
@@ -101,6 +107,7 @@ public class MappingService {
 
     private void validateDataset(String dataset, List<MappingDefinition.FieldMapping> fields, Set<String> expected) {
         if (fields == null) throw ApiException.unprocessable("INVALID_MAPPING", dataset + " mappings are required");
+        Set<String> mandatory = "CUSTOMERS".equals(dataset) ? MANDATORY_CUSTOMER_FIELDS : MANDATORY_ORDER_FIELDS;
         Set<String> seen = new java.util.HashSet<>();
         for (MappingDefinition.FieldMapping f : fields) {
             if (!expected.contains(f.targetField())) {
@@ -108,6 +115,10 @@ public class MappingService {
             }
             if (!seen.add(f.targetField())) {
                 throw ApiException.unprocessable("INVALID_MAPPING", "Target field mapped twice: " + f.targetField());
+            }
+            if (mandatory.contains(f.targetField()) && !f.required()) {
+                throw ApiException.unprocessable("INVALID_MAPPING",
+                        "Target field " + f.targetField() + " is NOT NULL in the target schema and cannot be optional (required=false)");
             }
             if (f.sourceColumn() == null || f.sourceColumn().isBlank()) {
                 throw ApiException.unprocessable("INVALID_MAPPING", "Source column is required for " + f.targetField());

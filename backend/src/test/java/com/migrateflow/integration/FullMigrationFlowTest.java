@@ -215,10 +215,4 @@ class FullMigrationFlowTest extends AbstractIntegrationTest {
         assertEquals("FROZEN", jdbc.queryForObject(
                 "SELECT status FROM control.manifests WHERE id = ?", String.class, second));
     }
-
-    private String approvalJson(UUID rehearsalId, UUID reportId, String uatHash) {
-        return "{\"decision\":\"APPROVE\",\"rehearsalRunId\":\"" + rehearsalId
-                + "\",\"reconciliationReportId\":\"" + reportId + "\",\"uatEvidenceHash\":\"" + uatHash
-                + "\",\"comment\":\"verified\"}";
-    }
 }

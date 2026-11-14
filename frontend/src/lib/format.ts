@@ -13,6 +13,13 @@ export function formatInstant(iso: string | null | undefined): string {
   return Number.isNaN(date.getTime()) ? iso : date.toISOString().replace('T', ' ').slice(0, 19) + ' UTC';
 }
 
+export class TimeoutError extends Error {
+  constructor(message = 'Polling timed out before completion') {
+    super(message);
+    this.name = 'TimeoutError';
+  }
+}
+
 /** Polls an async getter until the predicate holds or attempts run out. */
 export async function pollUntil<T>(
   fn: () => Promise<T>,
@@ -25,6 +32,9 @@ export async function pollUntil<T>(
   for (let i = 1; i < attempts && !done(last); i++) {
     await sleep(delayMs);
     last = await fn();
+  }
+  if (!done(last)) {
+    throw new TimeoutError(`Operation did not complete within ${attempts} attempts`);
   }
   return last;
 }

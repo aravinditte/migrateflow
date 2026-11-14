@@ -69,7 +69,16 @@ public final class CsvParser {
                             if (i + 1 < n && text.charAt(i + 1) == '"') { field.append('"'); i += 2; }
                             else { closed = true; i++; break; }
                         } else {
-                            if (c == '\n') line++;
+                            if (c == '\r') {
+                                line++;
+                                if (i + 1 < n && text.charAt(i + 1) == '\n') {
+                                    field.append(c);
+                                    i++;
+                                    c = text.charAt(i);
+                                }
+                            } else if (c == '\n') {
+                                line++;
+                            }
                             field.append(c);
                             i++;
                         }
@@ -94,8 +103,16 @@ public final class CsvParser {
                 if (i < n && text.charAt(i) == ',') {
                     i++;
                 } else {
-                    if (i < n && text.charAt(i) == '\r') i++;
-                    if (i < n && text.charAt(i) == '\n') { i++; line++; }
+                    if (i < n && text.charAt(i) == '\r') {
+                        i++;
+                        line++;
+                        if (i < n && text.charAt(i) == '\n') {
+                            i++;
+                        }
+                    } else if (i < n && text.charAt(i) == '\n') {
+                        i++;
+                        line++;
+                    }
                     endOfRecord = true;
                 }
             }

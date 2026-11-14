@@ -138,6 +138,9 @@ public final class ValidationEngine {
 
     private record FieldOutcome(Map<String, String> values, boolean ok) {}
 
+    private static final Set<String> MANDATORY_CUSTOMER_FIELDS = Set.of("external_customer_id", "full_name");
+    private static final Set<String> MANDATORY_ORDER_FIELDS = Set.of("external_order_id", "external_customer_id", "order_date", "amount_yen", "status");
+
     /**
      * Applies every field mapping for one row. Successfully transformed
      * values are kept even when a sibling field fails (so duplicate-key
@@ -148,6 +151,7 @@ public final class ValidationEngine {
                                             RawRow row, List<Issue> issues) {
         Map<String, String> values = new LinkedHashMap<>();
         boolean ok = true;
+        Set<String> mandatory = "CUSTOMERS".equals(kind) ? MANDATORY_CUSTOMER_FIELDS : MANDATORY_ORDER_FIELDS;
         for (MappingDefinition.FieldMapping f : fields) {
             String raw = row.values().get(f.sourceColumn());
             TransformEngine.Result r = TransformEngine.apply(f.steps(), raw);
@@ -159,7 +163,8 @@ public final class ValidationEngine {
                 continue;
             }
             String value = r.value();
-            if (f.required() && (value == null || value.isBlank())) {
+            boolean isMandatory = mandatory.contains(f.targetField());
+            if ((f.required() || isMandatory) && (value == null || value.isBlank())) {
                 issues.add(err(kind, row, "REQUIRED_VALUE", f.targetField(),
                         "Required field " + f.targetField() + " is missing"));
                 values.put(f.targetField(), null);

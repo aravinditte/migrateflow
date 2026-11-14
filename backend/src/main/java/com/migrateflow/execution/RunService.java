@@ -99,11 +99,20 @@ public class RunService {
         Map<String, Object> manifest = manifestRow(manifestId);
         UUID projectId = (UUID) manifest.get("project_id");
         CutoverLaunch launch = txTemplate.execute(status -> {
+            // Lock project and verify no active sibling runs (MF-012)
+            jdbc.queryForObject("SELECT id FROM control.projects WHERE id = ? FOR UPDATE", UUID.class, projectId);
+            Long siblings = jdbc.queryForObject(
+                    "SELECT count(*) FROM control.runs WHERE project_id = ? AND status IN ('QUEUED','RUNNING')",
+                    Long.class, projectId);
+            if (siblings != null && siblings > 0) {
+                throw ApiException.conflict("JOB_ALREADY_RUNNING", "This project already has an active run");
+            }
+
             if (idempotencyKey != null && !idempotencyKey.isBlank()) {
                 List<Map<String, Object>> existing = jdbc.queryForList(
-                        "SELECT id, approval_id FROM control.runs WHERE project_id = ? AND request_key = ?", projectId, idempotencyKey);
+                        "SELECT id, manifest_id, approval_id FROM control.runs WHERE project_id = ? AND request_key = ?", projectId, idempotencyKey);
                 if (!existing.isEmpty()) {
-                    if (!approvalId.equals(existing.get(0).get("approval_id"))) {
+                    if (!manifestId.equals(existing.get(0).get("manifest_id")) || !approvalId.equals(existing.get(0).get("approval_id"))) {
                         throw ApiException.conflict("IDEMPOTENCY_CONFLICT",
                                 "This Idempotency-Key was already used with a different payload");
                     }
@@ -129,12 +138,24 @@ public class RunService {
                 throw ApiException.unprocessable("INVALID_REFERENCE",
                         "Approval does not approve this manifest");
             }
+            // Check MF-010: ensure approval has not been superseded by a later REJECTED decision
+            Long laterRejection = jdbc.queryForObject(
+                    "SELECT count(*) FROM control.approvals WHERE manifest_id = ? AND decision = 'REJECTED' AND (created_at > (SELECT created_at FROM control.approvals WHERE id = ?) OR signed_at > (SELECT signed_at FROM control.approvals WHERE id = ?))",
+                    Long.class, manifestId, approvalId, approvalId);
+            if (laterRejection != null && laterRejection > 0) {
+                throw ApiException.conflict("APPROVAL_REVOKED", "A later rejection exists for this manifest; approval is revoked");
+            }
+
             UUID reviewerId = (UUID) approval.get("reviewer_id");
             if (reviewerId.equals(actor.id())) {
                 throw new ApiException(HttpStatus.FORBIDDEN, "SELF_APPROVAL_FORBIDDEN",
                         "The approver cannot launch the cutover they approved");
             }
             UUID rehearsalRunId = (UUID) approval.get("rehearsal_run_id");
+
+            // MF-011: Lock rehearsal run during preflight so UAT cannot mutate concurrently
+            jdbc.queryForObject("SELECT id FROM control.runs WHERE id = ? FOR UPDATE", UUID.class, rehearsalRunId);
+
             String rehearsalStatus = jdbc.queryForObject(
                     "SELECT status FROM control.runs WHERE id = ?", String.class, rehearsalRunId);
             if (!"VERIFIED".equals(rehearsalStatus)) {
@@ -173,15 +194,21 @@ public class RunService {
                     acceptedRows.acceptedCount(snapshotId));
             jdbc.update("UPDATE control.target_cutover_slot SET status = 'RESERVED', active_run_id = ?, updated_at = now() WHERE slot_id = 1",
                     newRunId);
+            // MF-014: Record audit inside the transaction with reservation
+            audit.record(projectId, actor.id(), "CUTOVER_LAUNCHED", "run", newRunId,
+                    Map.of("manifestId", manifestId.toString(), "approvalId", approvalId.toString()));
             return new CutoverLaunch(newRunId, true);
         });
         UUID runId = launch.runId();
         if (launch.created()) {
-            audit.record(projectId, actor.id(), "CUTOVER_LAUNCHED", "run", runId,
-                    Map.of("manifestId", manifestId.toString(), "approvalId", approvalId.toString()));
-            executor.execute(() -> executeRun(runId));
+            try {
+                executor.execute(() -> executeRun(runId));
+            } catch (Exception ex) {
+                log.warn("Executor rejected immediate run execution for {}; will be executed by queue or recovery", runId, ex);
+            }
         }
         return runId;
+    }
     }
 
     public void restart(AppUser actor, UUID runId) {
@@ -207,7 +234,7 @@ public class RunService {
                 throw ApiException.conflict("JOB_ALREADY_RUNNING", "This project already has an active run");
             }
             int claimed = jdbc.update(
-                    "UPDATE control.runs SET status = 'QUEUED', error_message = NULL WHERE id = ? AND status = 'FAILED_RESTARTABLE'",
+                    "UPDATE control.runs SET status = 'QUEUED', error_message = NULL WHERE id = ? AND status IN ('FAILED_RESTARTABLE', 'BATCH_COMPLETED')",
                     runId);
             if (claimed == 0) {
                 throw ApiException.conflict("JOB_NOT_RESTARTABLE", "Only a failed restartable run can be restarted");
@@ -229,6 +256,15 @@ public class RunService {
             return;
         }
         Map<String, Object> run = runRow(runId);
+        Long existingBatchExecutionId = (Long) run.get("batch_job_execution_id");
+        if (existingBatchExecutionId != null) {
+            JobExecution existingExec = jobExplorer.getJobExecution(existingBatchExecutionId);
+            if (existingExec != null && existingExec.getStatus() == BatchStatus.COMPLETED) {
+                log.info("Run {} already completed batch execution {}; proceeding directly to finalization", runId, existingBatchExecutionId);
+                finalizeCompletedRun(runId);
+                return;
+            }
+        }
         String kind = (String) run.get("kind");
         UUID manifestId = (UUID) run.get("manifest_id");
         UUID snapshotId = jdbc.queryForObject("SELECT snapshot_id FROM control.manifests WHERE id = ?", UUID.class, manifestId);
@@ -245,21 +281,7 @@ public class RunService {
             jdbc.update("UPDATE control.runs SET batch_job_instance_id = ?, batch_job_execution_id = ?, processed_rows = ? WHERE id = ?",
                     execution.getJobInstance().getInstanceId(), execution.getId(), processed, runId);
             if (execution.getStatus() == BatchStatus.COMPLETED) {
-                jdbc.update("UPDATE control.runs SET status = 'BATCH_COMPLETED' WHERE id = ?", runId);
-                ReconciliationService.Report report = reconciliation.reconcile(runId);
-                if ("PASS".equals(report.status())) {
-                    jdbc.update("UPDATE control.runs SET status = 'VERIFIED', finished_at = now() WHERE id = ?", runId);
-                    if ("REHEARSAL".equals(kind)) {
-                        uat.createDefaultCases(runId);
-                    } else {
-                        jdbc.update("UPDATE control.target_cutover_slot SET status = 'VERIFIED', verified_run_id = ?, updated_at = now() WHERE slot_id = 1",
-                                runId);
-                    }
-                    audit.record((UUID) run.get("project_id"), (UUID) run.get("requested_by"),
-                            "RUN_VERIFIED", "run", runId, Map.of("reportId", report.reportId().toString()));
-                } else {
-                    jdbc.update("UPDATE control.runs SET status = 'VERIFICATION_FAILED', finished_at = now() WHERE id = ?", runId);
-                }
+                finalizeCompletedRun(runId);
             } else {
                 String exit = execution.getExitStatus() == null ? "" : execution.getExitStatus().getExitDescription();
                 jdbc.update("UPDATE control.runs SET status = 'FAILED_RESTARTABLE', finished_at = now(), error_message = ? WHERE id = ?",
@@ -269,6 +291,36 @@ public class RunService {
             log.error("Run {} failed to execute", runId, e);
             jdbc.update("UPDATE control.runs SET status = 'FAILED_RESTARTABLE', finished_at = now(), error_message = ? WHERE id = ?",
                     String.valueOf(e.getMessage()).substring(0, Math.min(900, String.valueOf(e.getMessage()).length())), runId);
+        }
+    }
+
+    public void finalizeCompletedRun(UUID runId) {
+        Map<String, Object> run = runRow(runId);
+        String kind = (String) run.get("kind");
+        UUID projectId = (UUID) run.get("project_id");
+        UUID requestedBy = (UUID) run.get("requested_by");
+        try {
+            jdbc.update("UPDATE control.runs SET status = 'BATCH_COMPLETED' WHERE id = ?", runId);
+            ReconciliationService.Report report = reconciliation.reconcile(runId);
+            if ("PASS".equals(report.status())) {
+                txTemplate.executeWithoutResult(status -> {
+                    if ("REHEARSAL".equals(kind)) {
+                        uat.createDefaultCases(runId);
+                    } else {
+                        jdbc.update("UPDATE control.target_cutover_slot SET status = 'VERIFIED', verified_run_id = ?, updated_at = now() WHERE slot_id = 1",
+                                runId);
+                    }
+                    jdbc.update("UPDATE control.runs SET status = 'VERIFIED', finished_at = now(), error_message = NULL WHERE id = ?", runId);
+                    audit.record(projectId, requestedBy, "RUN_VERIFIED", "run", runId,
+                            Map.of("reportId", report.reportId().toString(), "executedBy", "SYSTEM", "requestedBy", requestedBy.toString()));
+                });
+            } else {
+                jdbc.update("UPDATE control.runs SET status = 'VERIFICATION_FAILED', finished_at = now() WHERE id = ?", runId);
+            }
+        } catch (Exception e) {
+            log.error("Run {} failed during finalization", runId, e);
+            jdbc.update("UPDATE control.runs SET status = 'FAILED_RESTARTABLE', finished_at = now(), error_message = ? WHERE id = ?",
+                    "Finalization failed: " + e.getMessage(), runId);
         }
     }
 

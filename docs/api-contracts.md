@@ -9,14 +9,15 @@ with a stable machine-readable `code`.
 |---|---|---|
 | `POST /auth/login`, `POST /auth/logout`, `GET /auth/me` | any | Session lifecycle |
 | `POST /admin/users`, `PUT /projects/{id}/members/{userId}` | ADMIN | User and membership admin |
-| `POST /projects`, `GET /projects`, `GET /projects/{id}`, `PATCH /projects/{id}` | member | Project lifecycle (archive blocked while a run is active) |
+| `POST /projects`, `GET /projects`, `GET /projects/{id}`, `POST /projects/{id}/archive` | ENGINEER / member | Project lifecycle (archive blocked while a run is active) |
+| `GET /projects/{id}/workflow` | member | Restores coherent workflow stage IDs across page refreshes |
 | `POST /projects/{id}/bundles` (multipart `customers`, `orders`) | ENGINEER | Paired CSV intake |
-| `GET /projects/{id}/bundles/{bundleId}` | member | Bundle profile (hashes, counts) |
-| `GET /projects/{id}/files/{fileId}/rows` | member | Paged raw-row preview |
-| `GET /projects/{id}/files/{fileId}/download` | member | Authorised source download |
+| `GET /bundles/{bundleId}/profile` | member | Bundle profile (hashes, counts) |
+| `GET /files/{fileId}/rows` | ENGINEER, AUDITOR | Paged raw-row preview with boundary checks |
+| `GET /files/{fileId}/download` | ENGINEER, AUDITOR | Verified source download (SHA-256 integrity checked) |
 | `POST /projects/{id}/mapping-revisions` | ENGINEER | Publish immutable mapping (empty body = default contract) |
 | `POST /projects/{id}/validation-snapshots` | ENGINEER | Start async validation (202) |
-| `GET /validation-snapshots/{id}`, `GET /validation-snapshots/{id}/issues` | member | Snapshot status/counts, filtered issues |
+| `GET /validation-snapshots/{id}`, `GET /validation-snapshots/{id}/issues` | member | Snapshot status/counts, paginated issues |
 | `POST /validation-snapshots/{id}/exclusions` | REVIEWER | Exclude an invalid row with a reason |
 | `POST /projects/{id}/manifests` | ENGINEER | Freeze manifest (409 until all invalid rows are excluded) |
 | `POST /manifests/{id}/rehearsals` | ENGINEER | Launch rehearsal run (202) |
@@ -24,7 +25,7 @@ with a stable machine-readable `code`.
 | `GET /runs/{id}`, `POST /runs/{id}/restart` | member / ENGINEER | Run status; same-identity restart of `FAILED_RESTARTABLE` |
 | `GET /runs/{id}/reconciliation` | member | Latest reconciliation report |
 | `GET /runs/{id}/report?format=json\|csv` | member | Evidence download (CSV is formula-escaped) |
-| `GET /rehearsals/{runId}/customers|orders` | member | Run-scoped rehearsal search |
+| `GET /rehearsals/{runId}/customers\|orders` | member | Run-scoped rehearsal search |
 | `GET /rehearsals/{runId}/uat` | member | UAT cases, latest results, defects, evidence hash |
 | `POST /rehearsals/{runId}/uat-executions`, `POST .../defects`, `PATCH .../defects/{id}` | REVIEWER | UAT execution and defect lifecycle |
 | `POST /manifests/{id}/approvals` | REVIEWER | Approve/reject with evidence hashes (creator cannot approve) |

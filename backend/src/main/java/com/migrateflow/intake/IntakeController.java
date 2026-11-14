@@ -1,6 +1,8 @@
 package com.migrateflow.intake;
 
 import com.migrateflow.common.ApiException;
+import com.migrateflow.common.CanonicalHash;
+import com.migrateflow.common.PageRequestUtil;
 import com.migrateflow.identity.AccessControl;
 import com.migrateflow.identity.AppUser;
 import com.migrateflow.identity.SecurityConfig;
@@ -43,6 +45,7 @@ public class IntakeController {
                                                       Authentication auth) {
         AppUser actor = SecurityConfig.requireUser(users, auth);
         access.requireProjectRole(actor, projectId, "ENGINEER");
+        access.requireActiveProject(projectId);
         Instant exported = (exportedAt == null || exportedAt.isBlank()) ? null : Instant.parse(exportedAt);
         IntakeService.BundleResult result = intake.uploadBundle(actor, projectId, customers, orders, exported);
         return ResponseEntity.status(HttpStatus.CREATED).body(Map.of(
@@ -86,7 +89,10 @@ public class IntakeController {
                                     @RequestParam(defaultValue = "0") int page,
                                     @RequestParam(defaultValue = "50") int size, Authentication auth) {
         AppUser actor = SecurityConfig.requireUser(users, auth);
-        access.requireMembership(actor, access.projectOfFile(fileId));
+        access.requireProjectRole(actor, access.projectOfFile(fileId), "ENGINEER", "AUDITOR");
+        int validPage = PageRequestUtil.validatePage(page);
+        int validSize = PageRequestUtil.validateSize(size);
+        int offset = PageRequestUtil.safeOffset(validPage, validSize);
         String kind = jdbc.query("SELECT kind FROM control.source_files WHERE id = ?",
                 (rs, n) -> rs.getString("kind"), fileId).stream().findFirst()
                 .orElseThrow(() -> ApiException.notFound("File"));
@@ -99,8 +105,8 @@ public class IntakeController {
                         "dataRowNumber", rs.getInt("data_row_number"),
                         "physicalLineStart", rs.getInt("physical_line_start"),
                         "values", rs.getString("raw_json")),
-                fileId, size, page * size);
-        return Map.of("content", rows, "page", page, "size", size);
+                fileId, validSize, offset);
+        return Map.of("content", rows, "page", validPage, "size", validSize);
     }
 
     @GetMapping("/files/{fileId}/download")
@@ -111,12 +117,26 @@ public class IntakeController {
         // enough to take raw legacy data out of the system.
         access.requireProjectRole(actor, access.projectOfFile(fileId), "ENGINEER", "AUDITOR");
         Map<String, String> file = jdbc.query(
-                "SELECT filename, storage_key FROM control.source_files WHERE id = ?",
-                (rs, n) -> Map.of("filename", rs.getString("filename"), "storageKey", rs.getString("storage_key")),
+                "SELECT filename, storage_key, sha256 FROM control.source_files WHERE id = ?",
+                (rs, n) -> Map.of("filename", rs.getString("filename"),
+                        "storageKey", rs.getString("storage_key"),
+                        "sha256", rs.getString("sha256")),
                 fileId).stream().findFirst().orElseThrow(() -> ApiException.notFound("File"));
+        java.nio.file.Path path = intake.storedPath(file.get("storageKey"));
+        try {
+            byte[] fileBytes = java.nio.file.Files.readAllBytes(path);
+            String currentSha = CanonicalHash.sha256Hex(fileBytes);
+            if (!currentSha.equals(file.get("sha256"))) {
+                throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "INTEGRITY_COMPROMISED", "Stored file fails integrity check");
+            }
+        } catch (java.io.IOException e) {
+            throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "STORAGE", "File unavailable");
+        }
+        org.springframework.http.ContentDisposition disposition = org.springframework.http.ContentDisposition.attachment()
+                .filename(file.get("filename"), java.nio.charset.StandardCharsets.UTF_8).build();
         return ResponseEntity.ok()
-                .header(HttpHeaders.CONTENT_DISPOSITION, "attachment; filename=\"" + file.get("filename") + "\"")
+                .headers(headers -> headers.setContentDisposition(disposition))
                 .contentType(MediaType.APPLICATION_OCTET_STREAM)
-                .body(new FileSystemResource(intake.storedPath(file.get("storageKey"))));
+                .body(new FileSystemResource(path));
     }
 }

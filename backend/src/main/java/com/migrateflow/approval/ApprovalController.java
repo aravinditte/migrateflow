@@ -46,12 +46,14 @@ public class ApprovalController {
                                   @NotNull UUID reconciliationReportId, @NotBlank String uatEvidenceHash,
                                   String comment) {}
 
+    @org.springframework.transaction.annotation.Transactional
     @PostMapping("/manifests/{manifestId}/approvals")
     public ResponseEntity<Map<String, Object>> approve(@PathVariable UUID manifestId,
                                                        @Valid @RequestBody ApprovalRequest body, Authentication auth) {
         AppUser actor = SecurityConfig.requireUser(users, auth);
         UUID projectId = access.projectOfManifest(manifestId);
         access.requireProjectRole(actor, projectId, "REVIEWER");
+        access.requireActiveProject(projectId);
         if (!java.util.List.of("APPROVE", "REJECT").contains(body.decision())) {
             throw ApiException.badRequest("INVALID_DECISION", "decision must be APPROVE or REJECT");
         }

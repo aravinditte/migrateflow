@@ -55,19 +55,27 @@ public class IntakeService {
         } catch (IOException e) {
             throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "STORAGE", "Upload storage unavailable");
         }
-        UUID bundleId = UUID.randomUUID();
-        jdbc.update("INSERT INTO control.dataset_bundles (id, project_id, exported_at, status, uploaded_by) VALUES (?,?,?,'UPLOADED',?)",
-                bundleId, projectId, exportedAt == null ? null : java.sql.Timestamp.from(exportedAt), actor.id());
-        StoredFile customers = storeOne(actor, bundleId, "CUSTOMERS", customersFile);
-        StoredFile orders = storeOne(actor, bundleId, "ORDERS", ordersFile);
-        jdbc.update("UPDATE control.dataset_bundles SET status = 'PROFILED' WHERE id = ?", bundleId);
-        audit.record(projectId, actor.id(), "BUNDLE_UPLOADED", "dataset_bundle", bundleId,
-                Map.of("customersSha256", customers.sha256(), "ordersSha256", orders.sha256(),
-                        "customersRows", customers.rowCount(), "ordersRows", orders.rowCount()));
-        return new BundleResult(bundleId, customers, orders);
+        List<Path> writtenFiles = new ArrayList<>();
+        try {
+            UUID bundleId = UUID.randomUUID();
+            jdbc.update("INSERT INTO control.dataset_bundles (id, project_id, exported_at, status, uploaded_by) VALUES (?,?,?,'UPLOADED',?)",
+                    bundleId, projectId, exportedAt == null ? null : java.sql.Timestamp.from(exportedAt), actor.id());
+            StoredFile customers = storeOne(actor, bundleId, "CUSTOMERS", customersFile, writtenFiles);
+            StoredFile orders = storeOne(actor, bundleId, "ORDERS", ordersFile, writtenFiles);
+            jdbc.update("UPDATE control.dataset_bundles SET status = 'PROFILED' WHERE id = ?", bundleId);
+            audit.record(projectId, actor.id(), "BUNDLE_UPLOADED", "dataset_bundle", bundleId,
+                    Map.of("customersSha256", customers.sha256(), "ordersSha256", orders.sha256(),
+                            "customersRows", customers.rowCount(), "ordersRows", orders.rowCount()));
+            return new BundleResult(bundleId, customers, orders);
+        } catch (Exception e) {
+            for (Path p : writtenFiles) {
+                try { Files.deleteIfExists(p); } catch (IOException ignore) {}
+            }
+            throw e;
+        }
     }
 
-    private StoredFile storeOne(AppUser actor, UUID bundleId, String kind, MultipartFile file) {
+    private StoredFile storeOne(AppUser actor, UUID bundleId, String kind, MultipartFile file, List<Path> writtenFiles) {
         if (file == null || file.isEmpty()) {
             throw ApiException.badRequest("FILE_REQUIRED", "The " + kind.toLowerCase() + " CSV file is required");
         }
@@ -85,8 +93,10 @@ public class IntakeService {
         CsvParser.ParsedCsv parsed = CsvParser.parse(bytes, maxRows, maxColumns);
         String sha = CanonicalHash.sha256Hex(bytes);
         String storageKey = UUID.randomUUID() + ".csv";
+        Path filePath = uploadDir.resolve(storageKey);
         try {
-            Files.write(uploadDir.resolve(storageKey), bytes);
+            Files.write(filePath, bytes);
+            writtenFiles.add(filePath);
         } catch (IOException e) {
             throw new ApiException(HttpStatus.INTERNAL_SERVER_ERROR, "STORAGE", "Could not store the uploaded file");
         }

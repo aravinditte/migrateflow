@@ -15,6 +15,8 @@ export interface ReconSummary {
 export default function RunPanel({ runId, setError }: { runId: string; setError: (e: string) => void }) {
   const [run, setRun] = useState<RunView | null>(null);
   const [recon, setRecon] = useState<{ status: string; summary: string; evidenceHash: string } | null>(null);
+  const [restarting, setRestarting] = useState(false);
+  const [restartError, setRestartError] = useState<string | null>(null);
   const refresh = useCallback(async () => {
     if (!runId) return;
     const current = await api.get<RunView>(`/api/v1/runs/${runId}`);
@@ -45,9 +47,27 @@ export default function RunPanel({ runId, setError }: { runId: string; setError:
           {run.errorMessage ? <span className="muted"> · {run.errorMessage}</span> : ''}</p>
       )}
       {run?.restartEligible && (
-        <p><button onClick={async () => { await api.post(`/api/v1/runs/${runId}/restart`); refresh().catch(() => undefined); }}>
-          Restart this run (same identity)</button></p>
+        <p>
+          <button
+            disabled={restarting}
+            onClick={async () => {
+              setRestarting(true);
+              setRestartError(null);
+              try {
+                await api.post(`/api/v1/runs/${runId}/restart`);
+                await refresh();
+              } catch (e: any) {
+                setRestartError(message(e));
+              } finally {
+                setRestarting(false);
+              }
+            }}
+          >
+            {restarting ? 'Restarting…' : 'Restart this run (same identity)'}
+          </button>
+        </p>
       )}
+      {restartError && <div className="error" style={{ marginBottom: '1rem' }}>{restartError}</div>}
       {summary && (
         <div className="grid">
           <div className="stat"><span className="muted">Customers written</span><b>{summary.customers.written}</b>

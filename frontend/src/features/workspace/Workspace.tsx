@@ -20,7 +20,37 @@ export default function Workspace({ project, role }: { project: Project; role: s
   const [tab, setTab] = useState<(typeof TABS)[number]>('Intake');
   const [flow, setFlow] = useState<FlowContext>(emptyFlow);
   const [error, setError] = useState('');
-  const patch = (p: Partial<FlowContext>) => setFlow((f) => ({ ...f, ...p }));
+  const patch = (p: Partial<FlowContext>) => {
+    setFlow((prev) => {
+      const next = { ...prev, ...p };
+      if (p.bundleId && p.bundleId !== prev.bundleId) {
+        next.snapshotId = '';
+        next.manifestId = '';
+        next.manifestHash = '';
+        next.rehearsalRunId = '';
+        next.approvalId = '';
+        next.cutoverRunId = '';
+      } else if (p.mappingRevisionId && p.mappingRevisionId !== prev.mappingRevisionId) {
+        next.snapshotId = '';
+        next.manifestId = '';
+        next.manifestHash = '';
+        next.rehearsalRunId = '';
+        next.approvalId = '';
+        next.cutoverRunId = '';
+      } else if (p.snapshotId && p.snapshotId !== prev.snapshotId) {
+        next.manifestId = '';
+        next.manifestHash = '';
+        next.rehearsalRunId = '';
+        next.approvalId = '';
+        next.cutoverRunId = '';
+      } else if (p.manifestId && p.manifestId !== prev.manifestId) {
+        next.rehearsalRunId = '';
+        next.approvalId = '';
+        next.cutoverRunId = '';
+      }
+      return next;
+    });
+  };
 
   useEffect(() => {
     api.get<FlowContext>(`/api/v1/projects/${project.id}/workflow`)

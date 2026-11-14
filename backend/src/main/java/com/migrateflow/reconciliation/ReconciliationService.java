@@ -44,9 +44,21 @@ public class ReconciliationService {
                 "SELECT snapshot_id FROM control.manifests WHERE id = ?", UUID.class, manifestId);
         boolean rehearsal = "REHEARSAL".equals(kind);
 
-        List<ReconciliationEngine.CustomerRec> expectedCustomers = acceptedRows.customers(manifestId, snapshotId).stream()
+        List<AcceptedRows.CustomerTarget> acceptedCusts = acceptedRows.customers(manifestId, snapshotId);
+        List<AcceptedRows.OrderTarget> acceptedOrds = acceptedRows.orders(manifestId, snapshotId);
+
+        Map<String, AcceptedRows.CustomerTarget> expectedCustMap = new HashMap<>();
+        for (AcceptedRows.CustomerTarget ct : acceptedCusts) {
+            expectedCustMap.put(ct.externalCustomerId(), ct);
+        }
+        Map<String, AcceptedRows.OrderTarget> expectedOrderMap = new HashMap<>();
+        for (AcceptedRows.OrderTarget ot : acceptedOrds) {
+            expectedOrderMap.put(ot.externalOrderId(), ot);
+        }
+
+        List<ReconciliationEngine.CustomerRec> expectedCustomers = acceptedCusts.stream()
                 .map(c -> new ReconciliationEngine.CustomerRec(c.externalCustomerId(), c.normalizedHash())).toList();
-        List<ReconciliationEngine.OrderRec> expectedOrders = acceptedRows.orders(manifestId, snapshotId).stream()
+        List<ReconciliationEngine.OrderRec> expectedOrders = acceptedOrds.stream()
                 .map(o -> new ReconciliationEngine.OrderRec(o.externalOrderId(), o.externalCustomerId(), o.amountYen(), o.normalizedHash())).toList();
 
         List<String> provenanceDiffs = new ArrayList<>();
@@ -54,47 +66,91 @@ public class ReconciliationService {
         List<ReconciliationEngine.OrderRec> actualOrders;
         if (rehearsal) {
             actualCustomers = jdbc.query(
-                    "SELECT external_customer_id, full_name, email, joined_on, origin_run_id, origin_manifest_id "
+                    "SELECT external_customer_id, full_name, email, joined_on, origin_run_id, origin_manifest_id, source_file_id, source_row_number "
                             + "FROM rehearsal.customers WHERE rehearsal_run_id = ?",
                     (rs, n) -> {
+                        String extId = rs.getString("external_customer_id");
                         checkProvenance(provenanceDiffs, rs.getObject("origin_run_id", UUID.class),
                                 rs.getObject("origin_manifest_id", UUID.class), runId, manifestId, "rehearsal customer");
-                        return new ReconciliationEngine.CustomerRec(rs.getString("external_customer_id"),
+                        AcceptedRows.CustomerTarget exp = expectedCustMap.get(extId);
+                        if (exp != null) {
+                            UUID actualFile = rs.getObject("source_file_id", UUID.class);
+                            int actualRow = rs.getInt("source_row_number");
+                            if (!exp.sourceFileId().equals(actualFile) || exp.sourceRowNumber() != actualRow) {
+                                provenanceDiffs.add("Customer " + extId + " provenance mismatch: expected file="
+                                        + exp.sourceFileId() + " row=" + exp.sourceRowNumber()
+                                        + ", got file=" + actualFile + " row=" + actualRow);
+                            }
+                        }
+                        return new ReconciliationEngine.CustomerRec(extId,
                                 CanonicalHash.hashFields(ValidationEngine.customerHashFields(
-                                        rs.getString("external_customer_id"), rs.getString("full_name"), rs.getString("email"),
+                                        extId, rs.getString("full_name"), rs.getString("email"),
                                         rs.getDate("joined_on") == null ? null : rs.getDate("joined_on").toLocalDate())));
                     }, runId);
             actualOrders = jdbc.query(
                     "SELECT o.external_order_id, c.external_customer_id AS cust_ext, o.order_date, o.amount_yen, o.status, "
-                            + "o.origin_run_id, o.origin_manifest_id "
+                            + "o.origin_run_id, o.origin_manifest_id, o.source_file_id, o.source_row_number "
                             + "FROM rehearsal.orders o LEFT JOIN rehearsal.customers c "
                             + "ON c.rehearsal_run_id = o.rehearsal_run_id AND c.id = o.customer_id WHERE o.rehearsal_run_id = ?",
                     (rs, n) -> {
+                        String extOrderId = rs.getString("external_order_id");
                         checkProvenance(provenanceDiffs, rs.getObject("origin_run_id", UUID.class),
                                 rs.getObject("origin_manifest_id", UUID.class), runId, manifestId, "rehearsal order");
-                        return orderRec(rs.getString("external_order_id"), rs.getString("cust_ext"),
+                        AcceptedRows.OrderTarget exp = expectedOrderMap.get(extOrderId);
+                        if (exp != null) {
+                            UUID actualFile = rs.getObject("source_file_id", UUID.class);
+                            int actualRow = rs.getInt("source_row_number");
+                            if (!exp.sourceFileId().equals(actualFile) || exp.sourceRowNumber() != actualRow) {
+                                provenanceDiffs.add("Order " + extOrderId + " provenance mismatch: expected file="
+                                        + exp.sourceFileId() + " row=" + exp.sourceRowNumber()
+                                        + ", got file=" + actualFile + " row=" + actualRow);
+                            }
+                        }
+                        return orderRec(extOrderId, rs.getString("cust_ext"),
                                 rs.getDate("order_date").toLocalDate(), rs.getLong("amount_yen"), rs.getString("status"));
                     }, runId);
         } else {
             actualCustomers = jdbc.query(
-                    "SELECT external_customer_id, full_name, email, joined_on, origin_run_id, origin_manifest_id "
+                    "SELECT external_customer_id, full_name, email, joined_on, origin_run_id, origin_manifest_id, source_file_id, source_row_number "
                             + "FROM target.customers WHERE origin_run_id = ?",
                     (rs, n) -> {
+                        String extId = rs.getString("external_customer_id");
                         checkProvenance(provenanceDiffs, rs.getObject("origin_run_id", UUID.class),
                                 rs.getObject("origin_manifest_id", UUID.class), runId, manifestId, "target customer");
-                        return new ReconciliationEngine.CustomerRec(rs.getString("external_customer_id"),
+                        AcceptedRows.CustomerTarget exp = expectedCustMap.get(extId);
+                        if (exp != null) {
+                            UUID actualFile = rs.getObject("source_file_id", UUID.class);
+                            int actualRow = rs.getInt("source_row_number");
+                            if (!exp.sourceFileId().equals(actualFile) || exp.sourceRowNumber() != actualRow) {
+                                provenanceDiffs.add("Customer " + extId + " provenance mismatch: expected file="
+                                        + exp.sourceFileId() + " row=" + exp.sourceRowNumber()
+                                        + ", got file=" + actualFile + " row=" + actualRow);
+                            }
+                        }
+                        return new ReconciliationEngine.CustomerRec(extId,
                                 CanonicalHash.hashFields(ValidationEngine.customerHashFields(
-                                        rs.getString("external_customer_id"), rs.getString("full_name"), rs.getString("email"),
+                                        extId, rs.getString("full_name"), rs.getString("email"),
                                         rs.getDate("joined_on") == null ? null : rs.getDate("joined_on").toLocalDate())));
                     }, runId);
             actualOrders = jdbc.query(
                     "SELECT o.external_order_id, c.external_customer_id AS cust_ext, o.order_date, o.amount_yen, o.status, "
-                            + "o.origin_run_id, o.origin_manifest_id "
+                            + "o.origin_run_id, o.origin_manifest_id, o.source_file_id, o.source_row_number "
                             + "FROM target.orders o LEFT JOIN target.customers c ON c.id = o.customer_id WHERE o.origin_run_id = ?",
                     (rs, n) -> {
+                        String extOrderId = rs.getString("external_order_id");
                         checkProvenance(provenanceDiffs, rs.getObject("origin_run_id", UUID.class),
                                 rs.getObject("origin_manifest_id", UUID.class), runId, manifestId, "target order");
-                        return orderRec(rs.getString("external_order_id"), rs.getString("cust_ext"),
+                        AcceptedRows.OrderTarget exp = expectedOrderMap.get(extOrderId);
+                        if (exp != null) {
+                            UUID actualFile = rs.getObject("source_file_id", UUID.class);
+                            int actualRow = rs.getInt("source_row_number");
+                            if (!exp.sourceFileId().equals(actualFile) || exp.sourceRowNumber() != actualRow) {
+                                provenanceDiffs.add("Order " + extOrderId + " provenance mismatch: expected file="
+                                        + exp.sourceFileId() + " row=" + exp.sourceRowNumber()
+                                        + ", got file=" + actualFile + " row=" + actualRow);
+                            }
+                        }
+                        return orderRec(extOrderId, rs.getString("cust_ext"),
                                 rs.getDate("order_date").toLocalDate(), rs.getLong("amount_yen"), rs.getString("status"));
                     }, runId);
             // Final target must contain exactly this migration's rows (spec 8.4).
@@ -106,6 +162,18 @@ public class ReconciliationService {
             if (totalOrders != null && totalOrders != actualOrders.size()) {
                 provenanceDiffs.add("final target holds " + totalOrders + " orders but this run wrote " + actualOrders.size());
             }
+        }
+
+        // MF-049: Explicitly compare applied-row ledger totals to written rows
+        Integer appliedCustCount = jdbc.queryForObject(
+                "SELECT count(*) FROM control.applied_rows WHERE run_id = ? AND kind = 'CUSTOMERS'", Integer.class, runId);
+        Integer appliedOrderCount = jdbc.queryForObject(
+                "SELECT count(*) FROM control.applied_rows WHERE run_id = ? AND kind = 'ORDERS'", Integer.class, runId);
+        if (appliedCustCount != null && appliedCustCount != actualCustomers.size()) {
+            provenanceDiffs.add("applied_rows customer ledger (" + appliedCustCount + ") does not match written customers (" + actualCustomers.size() + ")");
+        }
+        if (appliedOrderCount != null && appliedOrderCount != actualOrders.size()) {
+            provenanceDiffs.add("applied_rows order ledger (" + appliedOrderCount + ") does not match written orders (" + actualOrders.size() + ")");
         }
 
         ReconciliationEngine.Result result = ReconciliationEngine.compare(
