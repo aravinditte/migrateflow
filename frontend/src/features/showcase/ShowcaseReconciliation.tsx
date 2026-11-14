@@ -9,8 +9,8 @@ function Report({ title, report }: { title: string; report: ReconciliationView }
       <h3>{title}: <span className={report.status === 'PASS' ? 'ok' : 'error'}>{report.status}</span></h3>
       <table>
         <tbody>
-          <tr><td>Customers accepted → written</td><td>{s.customers.acceptedRows} → {s.customers.writtenRows}</td></tr>
-          <tr><td>Orders accepted → written</td><td>{s.orders.acceptedRows} → {s.orders.writtenRows}</td></tr>
+          <tr><td>Customers accepted → written</td><td>{s.customers.accepted} → {s.customers.written}</td></tr>
+          <tr><td>Orders accepted → written</td><td>{s.orders.accepted} → {s.orders.written}</td></tr>
           <tr><td>Order total accepted → written</td><td>{formatYen(s.orders.acceptedAmountYen)} → {formatYen(s.orders.writtenAmountYen)}</td></tr>
           <tr><td>Differences</td><td>{s.differences.length === 0 ? 'none' : s.differences.join('; ')}</td></tr>
           <tr><td>Evidence hash</td><td className="mono">{shortHash(report.evidenceHash)}…</td></tr>
