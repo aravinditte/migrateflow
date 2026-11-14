@@ -88,3 +88,12 @@ Docker daemon dependency inside tests (see ADR-006).
 - The bootstrap script itself is exercised by running it against a live
   deployment (Compose profile `showcase`); it is not unit-tested, and its
   UAT PASS records exist only where its real assertions passed.
+
+## Showcase end-to-end CI (`.github/workflows/showcase.yml`)
+
+A dedicated workflow boots the real backend against PostgreSQL 16 and
+runs the ACTUAL `scripts/bootstrap-showcase.py` (the Java integration
+tests deliberately do not re-implement it), then the anonymous verifier,
+an idempotency re-run, anonymous-mutation denials and a
+restart-persistence check. It must be added via the GitHub web UI (the
+API token lacks the Workflows permission), like ci.yml originally.
