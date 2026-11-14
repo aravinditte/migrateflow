@@ -20,8 +20,6 @@ import org.springframework.web.bind.annotation.RestController;
 @RequestMapping("/api/v1/showcase")
 public class ShowcaseController {
 
-    private static final int MAX_PAGE_SIZE = 50;
-
     private final ShowcaseQueryService query;
 
     public ShowcaseController(ShowcaseQueryService query) {
@@ -84,10 +82,10 @@ public class ShowcaseController {
     }
 
     private static int page(int page) {
-        return Math.max(0, page);
+        return com.migrateflow.common.PageRequestUtil.clampPage(page);
     }
 
     private static int size(int size) {
-        return Math.min(MAX_PAGE_SIZE, Math.max(1, size));
+        return com.migrateflow.common.PageRequestUtil.clampSize(size);
     }
 }
