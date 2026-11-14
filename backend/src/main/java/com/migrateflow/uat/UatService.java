@@ -49,16 +49,27 @@ public class UatService {
     }
 
     public List<Map<String, Object>> defects(UUID rehearsalRunId) {
+        // retestPassed mirrors the close guard in UatController exactly: a
+        // PASS execution of the defect's case at or after resolved_at. The
+        // UI uses it to guide the reviewer instead of discovering the 409.
         return jdbc.query(
-                "SELECT id, uat_case_id, severity, status, description, resolution_note, created_at FROM control.defects "
-                        + "WHERE rehearsal_run_id = ? ORDER BY created_at",
+                "SELECT d.id, d.uat_case_id, c.case_key, d.severity, d.status, d.description, d.resolution_note, d.resolved_at, "
+                        + "(d.uat_case_id IS NOT NULL) AS retest_required, "
+                        + "EXISTS (SELECT 1 FROM control.uat_executions e WHERE e.case_id = d.uat_case_id "
+                        + "AND e.result = 'PASS' AND d.resolved_at IS NOT NULL AND e.executed_at >= d.resolved_at) AS retest_passed "
+                        + "FROM control.defects d LEFT JOIN control.uat_cases c ON c.id = d.uat_case_id "
+                        + "WHERE d.rehearsal_run_id = ? ORDER BY d.created_at",
                 (rs, n) -> Map.<String, Object>of(
                         "defectId", rs.getObject("id", UUID.class).toString(),
                         "uatCaseId", rs.getObject("uat_case_id", UUID.class) == null ? "" : rs.getObject("uat_case_id", UUID.class).toString(),
+                        "caseKey", rs.getString("case_key") == null ? "" : rs.getString("case_key"),
                         "severity", rs.getString("severity"),
                         "status", rs.getString("status"),
                         "description", rs.getString("description"),
-                        "resolutionNote", rs.getString("resolution_note") == null ? "" : rs.getString("resolution_note")),
+                        "resolutionNote", rs.getString("resolution_note") == null ? "" : rs.getString("resolution_note"),
+                        "resolvedAt", rs.getTimestamp("resolved_at") == null ? "" : String.valueOf(rs.getTimestamp("resolved_at").toInstant()),
+                        "retestRequired", rs.getBoolean("retest_required"),
+                        "retestPassed", rs.getBoolean("retest_passed")),
                 rehearsalRunId);
     }
 
@@ -66,7 +77,7 @@ public class UatService {
     public String uatEvidenceHash(UUID rehearsalRunId) {
         List<String> lines = new ArrayList<>();
         jdbc.query("SELECT c.case_key, "
-                        + "(SELECT e.result || '|' || e.executed_by || '|' || e.executed_at FROM control.uat_executions e "
+                        + "(SELECT e.result || '|' || e.executed_by || '|' || to_char(e.executed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') FROM control.uat_executions e "
                         + " WHERE e.case_id = c.id ORDER BY e.executed_at DESC, e.created_at DESC LIMIT 1) AS latest "
                         + "FROM control.uat_cases c WHERE c.rehearsal_run_id = ? ORDER BY c.case_key",
                 (rs, n) -> {
