@@ -56,7 +56,7 @@ public abstract class AbstractIntegrationTest {
 
     @BeforeEach
     void resetState() {
-        jdbc.execute("TRUNCATE control.audit_events, control.approvals, control.defects, control.uat_executions, "
+        jdbc.execute("TRUNCATE control.showcase_scenarios, control.audit_events, control.approvals, control.defects, control.uat_executions, "
                 + "control.uat_cases, control.reconciliation_reports, control.applied_rows, control.runs, "
                 + "control.manifests, control.exclusion_decisions, control.validation_issues, control.validation_snapshots, "
                 + "control.rule_set_revisions, control.mapping_revisions, control.source_files, control.dataset_bundles, "

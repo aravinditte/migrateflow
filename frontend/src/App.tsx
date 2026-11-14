@@ -1,12 +1,16 @@
 import { useCallback, useEffect, useState } from 'react';
 import Login from './features/auth/Login';
 import { CreateProject, ProjectList, ProjectSummary } from './features/projects/Projects';
+import PublicShowcase from './features/showcase/PublicShowcase';
 import Workspace from './features/workspace/Workspace';
 import { api, Page, SessionUser } from './lib/api';
 
 export default function App() {
   const [user, setUser] = useState<SessionUser | null>(null);
   const [loading, setLoading] = useState(true);
+  // Anonymous visitors land on the public showcase; the operator login is
+  // an explicit detour, never the entry experience (Showcase spec 2/6).
+  const [showLogin, setShowLogin] = useState(false);
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
   const [selected, setSelected] = useState<ProjectSummary | null>(null);
   const [error, setError] = useState('');
@@ -33,7 +37,16 @@ export default function App() {
   };
 
   if (loading) return <main><p className="muted">Loading…</p></main>;
-  if (!user) return <Login onLogin={async (me) => { setUser(me); await loadProjects(); }} />;
+  if (!user) {
+    return showLogin
+      ? (
+        <main>
+          <p><button className="secondary" onClick={() => setShowLogin(false)}>← Back to public showcase</button></p>
+          <Login onLogin={async (me) => { setUser(me); await loadProjects(); }} />
+        </main>
+      )
+      : <PublicShowcase onSignIn={() => setShowLogin(true)} />;
+  }
 
   return (
     <div>

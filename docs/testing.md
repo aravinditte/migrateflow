@@ -30,9 +30,8 @@ for both rehearsal and cutover.
 
 `ProcessRecoveryTest` covers startup recovery: a run left `RUNNING` by a
 terminated process is marked `FAILED_RESTARTABLE` (its stale batch
-executions marked `FAILED` so Spring Batch permits restart) and verifies
-that the recovered run can be restarted under the same identity to `VERIFIED`.
-A test that kills a real OS process mid-batch is not part of the suite.
+executions abandoned) so the ordinary restart path can resume it. A test
+that kills a real OS process mid-batch is not part of the suite.
 
 `AcceptanceGapTest` covers the acceptance rows the first suite left thin:
 T11 in full (an unresolved BLOCKER defect blocks approval; closing a
@@ -70,3 +69,22 @@ Docker daemon dependency inside tests (see ADR-006).
 - Concurrent cutover racing beyond the transactional slot test path.
 - Browser-level UI automation; the frontend is verified by typecheck,
   unit tests and a live smoke against the real backend.
+
+## Showcase tests (SPEC section 20)
+
+- `ShowcaseSecurityTest`: anonymous overview answers NOT_READY with no
+  fabricated payload, data endpoints answer 503 before bootstrap,
+  anonymous mutations are 401 everywhere (including the private API), and
+  the internal register endpoint requires session + token.
+- `ShowcaseBootstrapTest`: a full real journey (upload → validate →
+  exclude → freeze → rehearse → UAT → approve → cutover over HTTP) is
+  registered READY; the anonymous overview then serves 995 / 1,990 /
+  ¥21,998,650 with integrity OK and all 11 workflow stages COMPLETED;
+  re-registration is idempotent (target counts and registry cardinality
+  unchanged); a READY claim with a deliberately wrong rehearsal pointer is
+  refused 422 and persisted FAILED.
+- `scripts/verify-showcase.py`: anonymous, read-only re-verification of a
+  running instance against `fixtures/expected_results.json`.
+- The bootstrap script itself is exercised by running it against a live
+  deployment (Compose profile `showcase`); it is not unit-tested, and its
+  UAT PASS records exist only where its real assertions passed.

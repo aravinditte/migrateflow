@@ -18,6 +18,31 @@ React 19 and TypeScript. Full specification: [SPEC.md](SPEC.md).
 Design notes: [docs/](docs/) (architecture, data contracts, schema,
 API contracts, runbook, testing, limitations, ADRs).
 
+## Public showcase (no login)
+
+The default page is a **public, read-only showcase**: one complete Hinata
+Trading migration that was executed end-to-end by the real backend —
+validation, reviewer exclusions, frozen manifest, Spring Batch rehearsal,
+scripted UAT, approval and final cutover — with every displayed figure read
+live from the persisted PostgreSQL evidence. The business data is
+synthetic; the execution is authentic; the UAT and approval actors are
+automated demo accounts and are labeled as such. The operator workbench
+(sign-in, roles, uploads) sits behind the "Operator sign in" button and is
+unchanged.
+
+To create the scenario on a fresh database, enable the one-time bootstrap
+and run it once (it is idempotent and fails closed):
+
+```bash
+# .env: MIGRATEFLOW_SHOWCASE_BOOTSTRAP_ENABLED=true
+#       MIGRATEFLOW_SHOWCASE_BOOTSTRAP_TOKEN=<choose-a-secret>
+docker compose up -d
+docker compose --profile showcase up showcase-bootstrap
+python3 scripts/verify-showcase.py http://localhost:8081   # anonymous re-check
+```
+
+Details: SPEC.md section 20 and `docs/runbook.md` ("Public showcase").
+
 ## Why it is built this way
 
 - **Immutable inputs.** Source files, mapping revisions and frozen manifests
